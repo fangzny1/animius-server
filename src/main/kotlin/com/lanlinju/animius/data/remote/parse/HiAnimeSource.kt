@@ -42,9 +42,9 @@ object HiAnimeSource : AnimeSource {
     }
 
     override suspend fun getHomeData(): List<HomeBean> {
-        val doc = Jsoup.parse(DownloadManager.getHtml(baseUrl))
+        val doc = Jsoup.parse(DownloadManager.getHtml("$baseUrl/most-popular"))
         val animes = doc.select("h3.film-name > a").mapNotNull { cardToAnime(it, baseUrl) }.distinctBy { it.url }
-        return if (animes.isEmpty()) emptyList() else listOf(HomeBean("热门番剧", "", animes))
+        return if (animes.isEmpty()) emptyList() else listOf(HomeBean("人气动漫", "", animes))
     }
 
     override suspend fun getWeekData(): Map<Int, List<AnimeBean>> = emptyMap()

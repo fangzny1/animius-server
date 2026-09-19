@@ -52,13 +52,16 @@ object Subtitles {
     suspend fun testLlm(): String {
         val base = SettingsStore.get("llmBaseUrl")?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("未配置 LLM API Base")
-        val reply = chat(
+        val model = SettingsStore.get("llmModel") ?: throw IllegalStateException("未配置模型名")
+        // 用真实翻译管线格式做测试（含 JSON 解析验证），只发 2 条不浪费限额
+        val reply = chatWithRetry(
             base,
             SettingsStore.get("llmApiKey") ?: "",
-            SettingsStore.get("llmModel") ?: throw IllegalStateException("未配置模型名"),
-            "请回复：OK",
+            model,
+            "1. Good morning.\n2. Who is that girl?",
         )
-        return reply.take(100)
+        if (reply.size < 2) throw IllegalStateException("模型未按 JSON 格式返回，试试换模型或重试")
+        return "双语管线 OK: ${reply.joinToString(" / ").take(80)}"
     }
 
     private fun cachePath(u: String, dataDir: Path): Path {
@@ -140,9 +143,13 @@ object Subtitles {
         repeat(2) { attempt ->
             runCatching {
                 val reply = chat(base, key, model, userMsg)
-                val arr = Regex("\\{[\\s\\S]*\\}").find(reply)?.value ?: return@runCatching
-                val t = json.parseToJsonElement(arr).jsonObject["t"]?.jsonArray
-                    ?: return@runCatching
+                    .replace(Regex("(?s)<think>.*?</think>"), "") // 去掉思考模型的思维链
+                val objStr = Regex("\\{[\\s\\S]*\\}").find(reply)?.value ?: return@runCatching
+                val t = runCatching { json.parseToJsonElement(objStr).jsonObject["t"]?.jsonArray }
+                    .getOrElse {
+                        // 兼容单引号 JSON（部分模型输出 Python 风格）
+                        json.parseToJsonElement(objStr.replace('\'', '"')).jsonObject["t"]?.jsonArray
+                    } ?: return@runCatching
                 return t.map { it.jsonPrimitive.content }
             }
             kotlinx.coroutines.delay(500L * (attempt + 1))
