@@ -109,18 +109,18 @@ object Subtitles {
         MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
             .joinToString("") { "%02x".format(it) }.take(24)
 
-    private fun cachePath(u: String, dataDir: Path): Path {
+    private fun cachePath(key: String, dataDir: Path): Path {
         val dir = dataDir.resolve("subtitles")
         dir.toFile().mkdirs()
-        return dir.resolve("${hashOf(u)}.vtt")
+        return dir.resolve("${key.replace(Regex("[^a-zA-Z0-9]"), "").take(40)}.vtt")
     }
 
     /**
      * 后台启动翻译任务（幂等：已缓存返回 done，进行中返回 running）。
      */
-    fun prepareAsync(url: String, referer: String?, dataDir: Path): JsonObject {
-        val hash = hashOf(url)
-        if (cachePath(url, dataDir).toFile().exists()) {
+    fun prepareAsync(url: String, referer: String?, dataDir: Path, cacheKey: String? = null): JsonObject {
+        val hash = cacheKey ?: hashOf(url)
+        if (cachePath(hash, dataDir).toFile().exists()) {
             return buildJsonObject { put("status", "done") }
         }
         errorMap.remove(hash)
@@ -134,7 +134,7 @@ object Subtitles {
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
             runCatching {
                 val original = fetchVtt(url, referer)
-                bilingualVtt(url, referer, original, dataDir)
+                bilingualVtt(url, referer, original, dataDir, cacheKey)
             }.onFailure {
                 errorMap[hash] = it.message ?: it.javaClass.simpleName
                 progressMap.remove(hash)
@@ -143,9 +143,9 @@ object Subtitles {
         return buildJsonObject { put("status", "started") }
     }
 
-    fun progressStatus(url: String, dataDir: Path): JsonObject {
-        val hash = hashOf(url)
-        if (cachePath(url, dataDir).toFile().exists()) {
+    fun progressStatus(url: String, dataDir: Path, cacheKey: String? = null): JsonObject {
+        val hash = cacheKey ?: hashOf(url)
+        if (cachePath(hash, dataDir).toFile().exists()) {
             val p = progressMap[hash]
             return buildJsonObject { put("status", "done"); put("done", p?.get(0) ?: 1); put("total", p?.get(1) ?: 1) }
         }
@@ -204,9 +204,9 @@ object Subtitles {
     /**
      * 返回双语 VTT：翻译结果按源 URL 缓存；LLM 未配置时返回原文。
      */
-    suspend fun bilingualVtt(url: String, referer: String?, original: String, dataDir: Path): String {
+    suspend fun bilingualVtt(url: String, referer: String?, original: String, dataDir: Path, cacheKey: String? = null): String {
         if (!configured()) return original
-        val cache = cachePath(url, dataDir)
+        val cache = cachePath(cacheKey ?: url, dataDir)
         if (cache.toFile().exists()) return cache.toFile().readText()
 
         val cues = parseVtt(original)
@@ -219,7 +219,8 @@ object Subtitles {
         val model = SettingsStore.get("llmModel")!!.trim()
 
         val batches = texts.chunked(batchSize)
-        progressMap[hashOf(url)] = intArrayOf(0, batches.size)
+        val pk = cacheKey ?: hashOf(url)
+        progressMap[pk] = intArrayOf(0, batches.size)
         batches.forEachIndexed { bi, batch ->
             val numbered = batch.mapIndexed { i, t -> "${i + 1}. ${t.replace('\n', ' ')}" }.joinToString("\n")
             val reply = chatWithRetry(base, key, model, numbered)
@@ -228,7 +229,7 @@ object Subtitles {
                 if (idx < translated.size && t.isNotBlank()) translated[idx] = t
             }
             done += batch.size
-            progressMap[hashOf(url)]?.let { it[0] = bi + 1 }
+            progressMap[pk]?.let { it[0] = bi + 1 }
             // 每批写一次进度缓存，避免中途失败全丢
             cache.toFile().writeText(buildVtt(cues) { i -> translated.getOrNull(i)?.takeIf { it.isNotBlank() } })
         }

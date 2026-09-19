@@ -317,7 +317,6 @@ async function renderWatch(p) {
   const subarea = $("#subarea");
   if (subTracks.length) {
     const st = ST;
-    const fontSize = subFontSize;
     const tracks = subTracks;
     let cur = defaultTrack;
     const zhTrack = tracks.find(t => t.lang === "zh");
@@ -325,7 +324,6 @@ async function renderWatch(p) {
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subon" checked> 字幕</label>
       ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${t.url}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>`;
-    const subStyle = subStyleBase;
     let aiOn = $("#subai").checked, polling = false;
     const applySub = (url) => { try { art.subtitle.switch(url); } catch (e) {} };
     const showSub = (on) => {
@@ -336,23 +334,58 @@ async function renderWatch(p) {
     showSub(true);
     subarea.insertAdjacentHTML("beforeend", `<span id="subhint" style="color:var(--dim);font-size:13px">字幕: ${esc(cur.label)}</span>`);
 
+    // 一次性签名失效时自动重新解析拿新地址（k 参数保证翻译缓存不失效）
+    const refreshTrackUrl = async (track) => {
+      try {
+        const v2 = await api("/api/video?url=" + encodeURIComponent(p.epUrl) + "&source=" + p.source +
+          "&title=" + encodeURIComponent(p.title || "") + "&ep=" + encodeURIComponent(p.epName || ""));
+        const t2 = (v2.subtitles || []).find(x => x.label === track.label && x.lang === track.lang);
+        if (t2 && t2.url !== track.url) {
+          track.url = t2.url;
+          const sel = document.querySelector("#subtrack");
+          if (sel) { sel.value = t2.url; }
+          return true;
+        }
+      } catch (e) {}
+      return false;
+    };
+    const loadTrack = async (track, bilingual) => {
+      const suffix = (bilingual && !zhTrack) ? "&translate=1" : "";
+      let res = await fetch(track.url + suffix);
+      if (!res.ok) {
+        setHint("字幕地址过期，重新解析…");
+        const refreshed = await refreshTrackUrl(track);
+        res = await fetch(track.url + suffix);
+        if (!res.ok && refreshed) {
+          // 换了新签名仍失败：源站没开放该语言
+          setHint("源站未提供「" + track.label + "」字幕（通常只有中文轨可用），已保留原字幕");
+          return false;
+        }
+      }
+      applySub(track.url + suffix);
+      return res.ok;
+    };
+    const subKey = (track) => {
+      const q = new URLSearchParams(track.url.split("?")[1]);
+      return "u=" + (q.get("u") || "") + (q.get("k") ? "&k=" + q.get("k") : "");
+    };
     $("#subon").onchange = (e) => showSub(e.target.checked);
     const trSel = $("#subtrack");
-    if (trSel) trSel.onchange = (e) => {
+    if (trSel) trSel.onchange = async (e) => {
       cur = tracks.find(t => t.url === e.target.value) || cur;
-      applySub(cur.url);
       setHint("字幕: " + cur.label);
-      if (aiOn) startAI();
+      if (aiOn && !zhTrack) await startAI();
+      else await loadTrack(cur, false);
     };
-    $("#subai").onchange = (e) => {
+    $("#subai").onchange = async (e) => {
       aiOn = e.target.checked;
       if (aiOn && zhTrack) {
         cur = zhTrack;
         if (trSel) trSel.value = zhTrack.url;
-        applySub(zhTrack.url);
+        await loadTrack(zhTrack, false);
         setHint("自带中文字幕 ✓（无需 AI 翻译）");
-      } else if (aiOn) startAI();
-      else { applySub(cur.url); setHint("字幕: " + cur.label); }
+      } else if (aiOn) await startAI();
+      else { await loadTrack(cur, false); setHint("字幕: " + cur.label); }
     };
     async function startAI() {
       if (polling) return;
@@ -361,21 +394,20 @@ async function renderWatch(p) {
         $("#subai").checked = false; aiOn = false; return;
       }
       polling = true;
-      const key = cur.url.split("u=")[1];
       try {
-        await api("/api/subtitle/prepare?u=" + key);
+        await api("/api/subtitle/prepare?" + subKey(cur));
         while (true) {
-          const p = await api("/api/subtitle/progress?u=" + key);
-          if (p.status === "done") { applySub(cur.url + "&translate=1"); setHint("AI双语 ✓ 原文+中文"); break; }
-          if (p.status === "error") { setHint("AI双语失败: " + (p.error || "")); $("#subai").checked = false; aiOn = false; break; }
-          if (p.status === "running") setHint(`AI双语: 翻译中 ${p.done}/${p.total} 批`);
+          const prog = await api("/api/subtitle/progress?" + subKey(cur));
+          if (prog.status === "done") { await loadTrack(cur, true); setHint("AI双语 ✓ 原文+中文"); break; }
+          if (prog.status === "error") { setHint("AI双语失败: " + (prog.error || "")); $("#subai").checked = false; aiOn = false; break; }
+          if (prog.status === "running") setHint(`AI双语: 翻译中 ${prog.done}/${prog.total} 批`);
           await new Promise(r => setTimeout(r, 2500));
         }
       } catch (e) { setHint("AI双语失败: " + e.message); }
       polling = false;
     }
     if (aiOn) {
-      if (zhTrack) { cur = zhTrack; applySub(zhTrack.url); setHint("自带中文字幕 ✓（无需 AI 翻译）"); }
+      if (zhTrack) { cur = zhTrack; loadTrack(zhTrack, false).then(() => setHint("自带中文字幕 ✓（无需 AI 翻译）")); }
       else startAI();
     }
   } else {

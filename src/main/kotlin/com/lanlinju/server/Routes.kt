@@ -358,7 +358,7 @@ fun Application.module() {
                 title = call.request.queryParameters["title"] ?: "",
                 episode = call.request.queryParameters["ep"] ?: "",
                 subtitles = bean.subtitles.map {
-                    SubtitleDto(it.label, it.lang, "/api/subtitle?u=${b64(it.url)}")
+                    SubtitleDto(it.label, it.lang, "/api/subtitle?u=${b64(it.url)}&k=${b64(it.label + "|" + it.lang)}")
                 },
             )
             call.respondText(Json.encodeToString(VideoDto.serializer(), dto), ContentType.Application.Json)
@@ -371,10 +371,11 @@ fun Application.module() {
                 ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
             val referer = originOf(u)
             val translate = call.request.queryParameters["translate"] == "1"
+            val cacheKey = call.request.queryParameters["k"]?.let { runCatching { unb64(it) }.getOrNull() }
             val original = withContext(Dispatchers.IO) { Subtitles.fetchVtt(u, referer) }
             val body = if (translate && Subtitles.configured()) {
                 withContext(Dispatchers.IO) {
-                    Subtitles.bilingualVtt(u, referer, original, SettingsStore.file.parent)
+                    Subtitles.bilingualVtt(u, referer, original, SettingsStore.file.parent, cacheKey)
                 }
             } else Subtitles.normalizeVtt(original)
             call.respondText(body, ContentType.parse("text/vtt; charset=utf-8"))
@@ -394,13 +395,15 @@ fun Application.module() {
             call.authed() ?: return@get
             val u = call.request.queryParameters["u"]?.let { runCatching { unb64(it) }.getOrNull() }
                 ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
-            call.respondText(Subtitles.prepareAsync(u, originOf(u), SettingsStore.file.parent).toString(), ContentType.Application.Json)
+            val ck = call.request.queryParameters["k"]?.let { runCatching { unb64(it) }.getOrNull() }
+            call.respondText(Subtitles.prepareAsync(u, originOf(u), SettingsStore.file.parent, ck).toString(), ContentType.Application.Json)
         }
         get("/api/subtitle/progress") {
             call.authed() ?: return@get
             val u = call.request.queryParameters["u"]?.let { runCatching { unb64(it) }.getOrNull() }
                 ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
-            call.respondText(Subtitles.progressStatus(u, SettingsStore.file.parent).toString(), ContentType.Application.Json)
+            val ck2 = call.request.queryParameters["k"]?.let { runCatching { unb64(it) }.getOrNull() }
+            call.respondText(Subtitles.progressStatus(u, SettingsStore.file.parent, ck2).toString(), ContentType.Application.Json)
         }
         get("/api/subtitle/test") {
             call.authed() ?: return@get
