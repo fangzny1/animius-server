@@ -13,6 +13,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.http.contentType
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -65,11 +66,56 @@ object Subtitles {
     }
 
     private fun cachePath(u: String, dataDir: Path): Path {
-        val hash = MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
-            .joinToString("") { "%02x".format(it) }.take(24)
         val dir = dataDir.resolve("subtitles")
         dir.toFile().mkdirs()
-        return dir.resolve("$hash.vtt")
+        return dir.resolve("${hashOf(u)}.vtt")
+    }
+
+    fun hashOf(u: String): String =
+        MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(24)
+
+    // 翻译进度: hash -> [已完成批次, 总批次]；errors: hash -> 错误信息
+    private val progressMap = java.util.concurrent.ConcurrentHashMap<String, IntArray>()
+    private val errorMap = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * 后台启动翻译任务（幂等：已缓存返回 done，进行中返回 running）。
+     */
+    fun prepareAsync(url: String, referer: String?, dataDir: Path): kotlinx.serialization.json.JsonObject {
+        val hash = hashOf(url)
+        if (cachePath(url, dataDir).toFile().exists()) {
+            return buildJsonObject { put("status", "done") }
+        }
+        errorMap.remove(hash)
+        val existing = progressMap[hash]
+        if (existing != null && existing[0] < existing[1]) {
+            return buildJsonObject { put("status", "running"); put("done", existing[0]); put("total", existing[1]) }
+        }
+        if (!configured()) {
+            return buildJsonObject { put("status", "error"); put("error", "LLM 未配置") }
+        }
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+            runCatching {
+                val original = fetchVtt(url, referer)
+                bilingualVtt(url, referer, original, dataDir)
+            }.onFailure {
+                errorMap[hash] = it.message ?: it.javaClass.simpleName
+                progressMap.remove(hash)
+            }
+        }
+        return buildJsonObject { put("status", "started") }
+    }
+
+    fun progressStatus(url: String, dataDir: Path): kotlinx.serialization.json.JsonObject {
+        val hash = hashOf(url)
+        if (cachePath(url, dataDir).toFile().exists()) {
+            val p = progressMap[hash]
+            return buildJsonObject { put("status", "done"); put("done", p?.get(0) ?: 1); put("total", p?.get(1) ?: 1) }
+        }
+        errorMap[hash]?.let { return buildJsonObject { put("status", "error"); put("error", it.take(150)) } }
+        progressMap[hash]?.let { return buildJsonObject { put("status", "running"); put("done", it[0]); put("total", it[1]) } }
+        return buildJsonObject { put("status", "idle") }
     }
 
     // 字幕拉取客户端：带出站代理（字幕常在被墙 CDN 上）
@@ -123,7 +169,9 @@ object Subtitles {
         val key = SettingsStore.get("llmApiKey") ?: ""
         val model = SettingsStore.get("llmModel")!!.trim()
 
-        texts.chunked(batchSize).forEach { batch ->
+        val batches = texts.chunked(batchSize)
+        progressMap[hashOf(url)] = intArrayOf(0, batches.size)
+        batches.forEachIndexed { bi, batch ->
             val numbered = batch.mapIndexed { i, t -> "${i + 1}. ${t.replace('\n', ' ')}" }.joinToString("\n")
             val reply = chatWithRetry(base, key, model, numbered)
             reply.forEachIndexed { i, t ->
@@ -131,6 +179,7 @@ object Subtitles {
                 if (idx < translated.size && t.isNotBlank()) translated[idx] = t
             }
             done += batch.size
+            progressMap[hashOf(url)]?.let { it[0] = bi + 1 }
             // 每批写一次进度缓存，避免中途失败全丢
             cache.toFile().writeText(buildBilingualVtt(original, cues, texts.zip(translated).toMap()))
         }

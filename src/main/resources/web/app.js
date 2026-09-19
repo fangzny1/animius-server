@@ -234,7 +234,7 @@ async function renderWatch(p) {
     <div class="row danmaku-toggle">
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="dmk" checked> 弹幕</label>
       <span style="color:var(--dim);font-size:13px">${esc(p.title)} · ${esc(p.epName)}</span>
-      <span id="subhint" style="color:var(--dim);font-size:13px"></span>
+      <span id="subarea" style="display:flex;gap:8px;align-items:center"></span>
     </div>`;
   $("#playerbar").classList.remove("hidden");
 
@@ -255,7 +255,7 @@ async function renderWatch(p) {
       m3u8: function (video, url) {
         if (hls) { hls.destroy(); hls = null; }
         if (Hls.isSupported()) {
-          hls = new Hls({ maxBufferLength: 30 });
+          hls = new Hls({ maxBufferLength: 60, maxMaxBufferLength: 300, backBufferLength: 30 });
           hls.loadSource(url);
           hls.attachMedia(video);
           hls.on(Hls.Events.MANIFEST_PARSED, () => video.play());
@@ -296,26 +296,64 @@ async function renderWatch(p) {
   art.on("video:pause", save);
   art.on("destroy", save);
 
-  // AI 双语字幕：先挂原文，后台翻译完成后热切换
+  // 字幕区：开关 / 轨道选择 / AI 双语 / 进度（字幕轨由 HiAnime 源提供）
+  const subarea = $("#subarea");
   if (v.subtitles && v.subtitles.length) {
-    const track = v.subtitles.find(t => t.lang === "en") || v.subtitles[0];
     const st = await api("/api/settings");
-    const hint = $("#subhint");
-    hint.textContent = "字幕: " + track.label;
-    if (st.aiSubEnabled) {
+    const fontSize = (parseInt(st.subFontSize) || 22);
+    const tracks = v.subtitles;
+    let cur = tracks.find(t => t.lang === "en") || tracks[0];
+    subarea.innerHTML = `
+      <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subon" checked> 字幕</label>
+      ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${t.url}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
+      <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> AI双语</label>`;
+    const subStyle = { color: "#FFE082", "text-shadow": "0 0 4px #000, 0 2px 4px #000", background: "rgba(0,0,0,.45)", fontSize: fontSize + "px" };
+    let aiOn = $("#subai").checked, polling = false;
+    const applySub = (url) => { try { art.subtitle.update({ url, type: "vtt", style: subStyle }); } catch (e) {} };
+    const showSub = (on) => {
+      try { art.subtitle.show = on; } catch (e) {}
+      const el = document.querySelector(".art-subtitle"); if (el) el.style.display = on ? "" : "none";
+    };
+    const setHint = (s) => { $("#subhint").textContent = s; };
+    showSub(true);
+    subarea.insertAdjacentHTML("beforeend", `<span id="subhint" style="color:var(--dim);font-size:13px">字幕: ${esc(cur.label)}</span>`);
+
+    $("#subon").onchange = (e) => showSub(e.target.checked);
+    const trSel = $("#subtrack");
+    if (trSel) trSel.onchange = (e) => {
+      cur = tracks.find(t => t.url === e.target.value) || cur;
+      applySub(cur.url);
+      setHint("字幕: " + cur.label);
+      if (aiOn) startAI();
+    };
+    $("#subai").onchange = (e) => {
+      aiOn = e.target.checked;
+      if (aiOn) startAI();
+      else { applySub(cur.url); setHint("字幕: " + cur.label); }
+    };
+    async function startAI() {
+      if (polling) return;
       if (!st.llmBaseUrl || !st.llmModel) {
-        hint.textContent = "AI 双语字幕: 未配置 LLM（设置页填写），显示原文";
-      } else {
-        hint.textContent = "AI 双语字幕: 翻译中（首次约 1-2 分钟，之后秒开）…";
-        try {
-          await fetch(track.url + "&translate=1");
-          art.subtitle.update({ url: track.url + "&translate=1", type: "vtt" });
-          hint.textContent = "AI 双语字幕 ✓（原文+中文）";
-        } catch (e) {
-          hint.textContent = "AI 双语字幕失败，显示原文";
-        }
+        setHint("AI双语: 未配置 LLM（设置页填写）");
+        $("#subai").checked = false; aiOn = false; return;
       }
+      polling = true;
+      const key = cur.url.split("u=")[1];
+      try {
+        await api("/api/subtitle/prepare?u=" + key);
+        while (true) {
+          const p = await api("/api/subtitle/progress?u=" + key);
+          if (p.status === "done") { applySub(cur.url + "&translate=1"); setHint("AI双语 ✓ 原文+中文"); break; }
+          if (p.status === "error") { setHint("AI双语失败: " + (p.error || "")); $("#subai").checked = false; aiOn = false; break; }
+          if (p.status === "running") setHint(`AI双语: 翻译中 ${p.done}/${p.total} 批`);
+          await new Promise(r => setTimeout(r, 2500));
+        }
+      } catch (e) { setHint("AI双语失败: " + e.message); }
+      polling = false;
     }
+    if (aiOn) startAI();
+  } else {
+    subarea.innerHTML = '<span id="subhint" style="color:var(--dim);font-size:13px">该源无字幕轨（字幕由 HiAnime 源提供）</span>';
   }
 }
 
@@ -363,6 +401,8 @@ async function renderSettings() {
       <input type="text" id="s-proxy" value="${raw(s.outboundProxy || "")}">
       <h2 class="sect">AI 双语字幕（OpenAI 兼容接口）</h2>
       <label><input type="checkbox" id="s-aisub" ${s.aiSubEnabled ? "checked" : ""}> 播放时自动翻译为双语字幕（原文+中文）</label>
+      <label>字幕字号（px）</label>
+      <input type="text" id="s-subsize" value="${raw(s.subFontSize || "22")}">
       <label>API Base（如 https://api.deepseek.com/v1 或 http://127.0.0.1:8080/v1）</label>
       <input type="text" id="s-llmurl" value="${raw(s.llmBaseUrl || "")}">
       <label>API Key</label>
@@ -382,7 +422,7 @@ async function renderSettings() {
       ddpAppId: $("#s-appid").value, ddpSecret: $("#s-secret").value,
       outboundProxy: $("#s-proxy").value,
       llmBaseUrl: $("#s-llmurl").value, llmApiKey: $("#s-llmkey").value,
-      llmModel: $("#s-llmmodel").value, aiSubEnabled: $("#s-aisub").checked ? "true" : "false" }) });
+      llmModel: $("#s-llmmodel").value, aiSubEnabled: $("#s-aisub").checked ? "true" : "false", subFontSize: $("#s-subsize").value }) });
     $("#s-save").textContent = "已保存 ✓（代理需 anime restart）";
     setTimeout(() => $("#s-save").textContent = "保存", 2500);
   };

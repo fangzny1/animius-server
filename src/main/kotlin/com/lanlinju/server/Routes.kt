@@ -378,6 +378,19 @@ fun Application.module() {
             } else original
             call.respondText(body, ContentType.parse("text/vtt; charset=utf-8"))
         }
+        // 后台启动翻译（幂等），配合 progress 轮询显示进度
+        get("/api/subtitle/prepare") {
+            call.authed() ?: return@get
+            val u = call.request.queryParameters["u"]?.let { runCatching { unb64(it) }.getOrNull() }
+                ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
+            call.respondText(Subtitles.prepareAsync(u, originOf(u), SettingsStore.file.parent).toString(), ContentType.Application.Json)
+        }
+        get("/api/subtitle/progress") {
+            call.authed() ?: return@get
+            val u = call.request.queryParameters["u"]?.let { runCatching { unb64(it) }.getOrNull() }
+                ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
+            call.respondText(Subtitles.progressStatus(u, SettingsStore.file.parent).toString(), ContentType.Application.Json)
+        }
         get("/api/subtitle/test") {
             call.authed() ?: return@get
             runCatching { Subtitles.testLlm() }
@@ -501,6 +514,7 @@ fun Application.module() {
                 put("llmApiKey", SettingsStore.get("llmApiKey") ?: "")
                 put("llmModel", SettingsStore.get("llmModel") ?: "")
                 put("aiSubEnabled", SettingsStore.get("aiSubEnabled")?.toBooleanStrictOrNull() ?: false)
+                put("subFontSize", SettingsStore.get("subFontSize") ?: "22")
             }.toString(), ContentType.Application.Json)
         }
         post("/api/settings") {
@@ -513,6 +527,7 @@ fun Application.module() {
             obj["llmApiKey"]?.jsonPrimitive?.content?.let { SettingsStore.put("llmApiKey", it.trim()) }
             obj["llmModel"]?.jsonPrimitive?.content?.let { SettingsStore.put("llmModel", it.trim()) }
             obj["aiSubEnabled"]?.jsonPrimitive?.content?.let { SettingsStore.put("aiSubEnabled", it) }
+            obj["subFontSize"]?.jsonPrimitive?.content?.let { SettingsStore.put("subFontSize", it.filter { c -> c.isDigit() }.ifBlank { "22" }) }
             call.respondText("""{"ok":true}""", ContentType.Application.Json)
         }
 
