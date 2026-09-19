@@ -79,6 +79,13 @@ private val proxyClient by lazy {
             config {
                 sslSocketFactory(trustAllContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
                 hostnameVerifier { _, _ -> true }
+                runCatching {
+                    SettingsStore.get("outboundProxy")?.takeIf { it.isNotBlank() }?.let { spec ->
+                        val uri = java.net.URI(spec.trim())
+                        val type = if (uri.scheme.startsWith("socks")) java.net.Proxy.Type.SOCKS else java.net.Proxy.Type.HTTP
+                        proxy(java.net.Proxy(type, java.net.InetSocketAddress(uri.host, if (uri.port > 0) uri.port else 8080)))
+                    }
+                }
             }
         }
         followRedirects = true
@@ -153,6 +160,8 @@ private fun sourceOf(param: String?): AnimeSource {
     val mode = param?.takeIf { it.isNotBlank() }?.let {
         runCatching { SourceMode.valueOf(it) }.getOrNull()
     } ?: SourceHolder.currentSourceMode
+    // 保持 currentSourceMode 与请求一致：解析器内部按“当前源”读取域名覆盖、验证码 Cookie 等
+    if (mode != SourceHolder.currentSourceMode) SourceHolder.switchSource(mode)
     return SourceHolder.getSource(mode)
 }
 
@@ -435,22 +444,28 @@ fun Application.module() {
         post("/api/captcha") {
             call.authed() ?: return@post
             val obj = json.parseToJsonElement(call.receiveText()).jsonObject
-            val cookies = obj["cookies"]?.jsonPrimitive?.content ?: ""
+            // Cookie 要存到对应源名下（解析器按当前源读取）
+            val src = obj["source"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                ?.let { runCatching { SourceMode.valueOf(it) }.getOrNull() } ?: SourceHolder.currentSourceMode
+            val raw = obj["cookies"]?.jsonPrimitive?.content ?: ""
+            val cookies = normalizeCookies(raw)
             if (cookies.isBlank()) {
                 call.respondText("""{"error":"empty cookies"}""", ContentType.Application.Json, HttpStatusCode.BadRequest)
             } else {
-                CaptchaCookieManager.saveCookies(CaptchaCookieManager.CUR_KEY_COOKIE, cookies)
+                CaptchaCookieManager.saveCookies(src.name + "_Cookie", cookies)
                 CaptchaCookieManager.captchaUrl = ""
-                call.respondText("""{"ok":true}""", ContentType.Application.Json)
+                logger.info("saved {} cookies for source {}", cookies.split("; ").size, src.name)
+                call.respondText("""{"ok":true,"source":"${src.name}","count":${cookies.split("; ").size}}""", ContentType.Application.Json)
             }
         }
 
-        // ---------- 设置（弹幕凭据等） ----------
+        // ---------- 设置（弹幕凭据、出站代理等） ----------
         get("/api/settings") {
             call.authed() ?: return@get
             call.respondText(buildJsonObject {
                 put("ddpAppId", SettingsStore.get("ddpAppId") ?: "")
                 put("ddpSecret", SettingsStore.get("ddpSecret") ?: "")
+                put("outboundProxy", SettingsStore.get("outboundProxy") ?: "")
             }.toString(), ContentType.Application.Json)
         }
         post("/api/settings") {
@@ -458,6 +473,7 @@ fun Application.module() {
             val obj = json.parseToJsonElement(call.receiveText()).jsonObject
             obj["ddpAppId"]?.jsonPrimitive?.content?.let { SettingsStore.put("ddpAppId", it) }
             obj["ddpSecret"]?.jsonPrimitive?.content?.let { SettingsStore.put("ddpSecret", it) }
+            obj["outboundProxy"]?.jsonPrimitive?.content?.let { SettingsStore.put("outboundProxy", it.trim()) }
             call.respondText("""{"ok":true}""", ContentType.Application.Json)
         }
 
@@ -496,6 +512,32 @@ fun Application.module() {
             }
         }
     }
+}
+
+/**
+ * 兼容两种 Cookie 粘贴格式：
+ * 1. 请求头格式: "a=b; c=d"（可带 "Cookie:" 前缀，可多行）
+ * 2. 浏览器插件导出的 Netscape 格式（每行 7 个 tab 分隔字段）
+ */
+private fun normalizeCookies(raw: String): String {
+    val text = raw.trim()
+    if (text.contains('\t')) {
+        return text.lines().mapNotNull { ln ->
+            val l = ln.trim()
+            if (l.isEmpty()) return@mapNotNull null
+            val body = when {
+                l.startsWith("#HttpOnly_") -> l.removePrefix("#HttpOnly_")
+                l.startsWith("#") || l.startsWith("#Netscape") -> return@mapNotNull null
+                else -> l
+            }
+            val f = body.split('\t').map { it.trim() }
+            if (f.size >= 7 && f[5].isNotBlank()) "${f[5]}=${f[6]}" else null
+        }.joinToString("; ").ifBlank { "" }
+    }
+    return text.lineSequence()
+        .map { it.trim().replace(Regex("(?i)^cookie:\\s*"), "") }
+        .filter { it.contains("=") && !it.startsWith("#") }
+        .joinToString("; ")
 }
 
 private fun formatEpisodeForDanmaku(episodeName: String): String? {

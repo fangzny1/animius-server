@@ -139,7 +139,7 @@ async function renderSearch(p) {
       $("#qres").innerHTML = `<div class="grid">${list.map(a => card(a)).join("")}</div>`;
     } else {
       $("#qres").innerHTML = `<div class="empty">「${esc(q)}」在当前源没有结果，可换上面的数据源重试，或检查是否触发了风控</div>`;
-      renderCaptchaHelper($("#qres"));
+      renderCaptchaHelper($("#qres"), $("#srcsel").value);
     }
   };
   $("#qgo").onclick = run;
@@ -150,7 +150,7 @@ async function renderSearch(p) {
 function openDetail(source, url) { go("detail", { source, url }); }
 
 /* ---------- 验证码辅助（对应 App 的 WebView 人工过验证） ---------- */
-async function renderCaptchaHelper(container) {
+async function renderCaptchaHelper(container, source) {
   let st = {};
   try { st = await api("/api/captcha"); } catch (e) { return; }
   if (!st.pending) return;
@@ -158,19 +158,20 @@ async function renderCaptchaHelper(container) {
     <div class="captcha-box">
       <p><b>⚠ 该数据源触发了验证码</b></p>
       <p class="tip">1. 在浏览器新标签页打开下面的链接，完成人机验证；<br>
-         2. 验证通过后按 F12 → 网络(Network) → 任意请求 → 复制请求头里完整的 Cookie 值；<br>
-         3. 粘贴到下面并保存，然后重试搜索。</p>
+         2. 验证通过后把 Cookie 粘贴到下面：F12 → 网络 → 任意请求 → 复制请求头里的 Cookie 值，<br>
+         或用浏览器插件导出的 Netscape 格式整段粘贴，两种都支持；<br>
+         3. 保存后重试搜索。</p>
       <p><a href="${raw(st.url)}" target="_blank" rel="noopener">${raw(st.url)}</a></p>
-      <textarea id="ck-input" rows="2" placeholder="粘贴 Cookie，如: xx=yy; zz=ww"></textarea>
+      <textarea id="ck-input" rows="4" placeholder="粘贴 Cookie：请求头格式 xx=yy; zz=ww 或 Netscape 导出格式"></textarea>
       <div><button class="btn" id="ck-save">保存 Cookie</button></div>
       <div class="err" id="ck-err"></div>
     </div>`);
   $("#ck-save").onclick = async () => {
     const v = $("#ck-input").value.trim();
     if (!v) { $("#ck-err").textContent = "请先粘贴 Cookie"; return; }
-    await api("/api/captcha", { method: "POST", body: JSON.stringify({ cookies: v }) });
+    const r = await api("/api/captcha", { method: "POST", body: JSON.stringify({ cookies: v, source: source || st.source }) });
     $("#ck-err").style.color = "#7ee787";
-    $("#ck-err").textContent = "已保存，请重试搜索";
+    $("#ck-err").textContent = `已保存到 ${r.source}（${r.count} 条），请重试搜索`;
   };
 }
 
@@ -331,14 +332,16 @@ async function renderSettings() {
       <input type="text" id="s-appid" value="${raw(s.ddpAppId || "")}">
       <label>弹弹play AppSecret</label>
       <input type="password" id="s-secret" value="${raw(s.ddpSecret || "")}">
+      <label>出站代理（可选，如 http://127.0.0.1:10800 或 socks://127.0.0.1:10808，留空直连）</label>
+      <input type="text" id="s-proxy" value="${raw(s.outboundProxy || "")}">
       <div style="margin-top:16px"><button class="btn" id="s-save">保存</button></div>
-      <p class="tip">申请地址：https://api.dandanplay.net/register<br>
-      服务端数据目录含 settings.json（数据源域名等）与 animius.db（历史/收藏）。</p>
+      <p class="tip">弹弹play 申请地址：https://api.dandanplay.net/register<br>
+      出站代理用于抓源走代理的场景，保存后需在容器里执行 anime restart 才生效。</p>
     </div>`;
   $("#s-save").onclick = async () => {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ ddpAppId: $("#s-appid").value, ddpSecret: $("#s-secret").value }) });
-    $("#s-save").textContent = "已保存 ✓";
-    setTimeout(() => $("#s-save").textContent = "保存", 1500);
+    await api("/api/settings", { method: "POST", body: JSON.stringify({ ddpAppId: $("#s-appid").value, ddpSecret: $("#s-secret").value, outboundProxy: $("#s-proxy").value }) });
+    $("#s-save").textContent = "已保存 ✓（代理需 anime restart）";
+    setTimeout(() => $("#s-save").textContent = "保存", 2500);
   };
 }
 
