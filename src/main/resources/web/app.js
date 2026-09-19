@@ -234,6 +234,7 @@ async function renderWatch(p) {
     <div class="row danmaku-toggle">
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="dmk" checked> 弹幕</label>
       <span style="color:var(--dim);font-size:13px">${esc(p.title)} · ${esc(p.epName)}</span>
+      <span id="subhint" style="color:var(--dim);font-size:13px"></span>
     </div>`;
   $("#playerbar").classList.remove("hidden");
 
@@ -246,6 +247,10 @@ async function renderWatch(p) {
     volume: 0.7, autoplay: true, setting: true, playbackRate: true, aspectRatio: true, flip: true,
     fullscreen: true, fullscreenWeb: true, miniProgressBar: true, airplay: true, pip: true,
     autoOrientation: true, autoSize: false,
+    subtitle: v.subtitles && v.subtitles.length ? {
+      url: v.subtitles[0].url, type: "vtt", encoding: "utf-8",
+      style: { color: "#FFE082", "text-shadow": "0 0 4px #000, 0 2px 4px #000", background: "rgba(0,0,0,.45)", fontSize: "22px" },
+    } : undefined,
     customType: {
       m3u8: function (video, url) {
         if (hls) { hls.destroy(); hls = null; }
@@ -290,6 +295,28 @@ async function renderWatch(p) {
   saveTimer = setInterval(save, 5000);
   art.on("video:pause", save);
   art.on("destroy", save);
+
+  // AI 双语字幕：先挂原文，后台翻译完成后热切换
+  if (v.subtitles && v.subtitles.length) {
+    const track = v.subtitles.find(t => t.lang === "en") || v.subtitles[0];
+    const st = await api("/api/settings");
+    const hint = $("#subhint");
+    hint.textContent = "字幕: " + track.label;
+    if (st.aiSubEnabled) {
+      if (!st.llmBaseUrl || !st.llmModel) {
+        hint.textContent = "AI 双语字幕: 未配置 LLM（设置页填写），显示原文";
+      } else {
+        hint.textContent = "AI 双语字幕: 翻译中（首次约 1-2 分钟，之后秒开）…";
+        try {
+          await fetch(track.url + "&translate=1");
+          art.subtitle.update({ url: track.url + "&translate=1", type: "vtt" });
+          hint.textContent = "AI 双语字幕 ✓（原文+中文）";
+        } catch (e) {
+          hint.textContent = "AI 双语字幕失败，显示原文";
+        }
+      }
+    }
+  }
 }
 
 function stopPlayer() {
@@ -334,14 +361,40 @@ async function renderSettings() {
       <input type="password" id="s-secret" value="${raw(s.ddpSecret || "")}">
       <label>出站代理（可选，如 http://127.0.0.1:10800 或 socks://127.0.0.1:10808，留空直连）</label>
       <input type="text" id="s-proxy" value="${raw(s.outboundProxy || "")}">
-      <div style="margin-top:16px"><button class="btn" id="s-save">保存</button></div>
+      <h2 class="sect">AI 双语字幕（OpenAI 兼容接口）</h2>
+      <label><input type="checkbox" id="s-aisub" ${s.aiSubEnabled ? "checked" : ""}> 播放时自动翻译为双语字幕（原文+中文）</label>
+      <label>API Base（如 https://api.deepseek.com/v1 或 http://127.0.0.1:8080/v1）</label>
+      <input type="text" id="s-llmurl" value="${raw(s.llmBaseUrl || "")}">
+      <label>API Key</label>
+      <input type="password" id="s-llmkey" value="${raw(s.llmApiKey || "")}">
+      <label>模型名（如 deepseek-chat / glm-4-flash / qwen3-4b）</label>
+      <input type="text" id="s-llmmodel" value="${raw(s.llmModel || "")}">
+      <div style="margin-top:12px" class="row">
+        <button class="btn" id="s-save">保存</button>
+        <button class="btn ghost" id="s-test">测试 LLM 连接</button>
+        <span id="s-testres" style="color:var(--dim);font-size:13px"></span>
+      </div>
       <p class="tip">弹弹play 申请地址：https://api.dandanplay.net/register<br>
-      出站代理用于抓源走代理的场景，保存后需在容器里执行 anime restart 才生效。</p>
+      字幕翻译走 OpenAI 兼容接口（chat/completions），本地 llama.cpp/ollama 也可以；字幕按集缓存，翻过的集秒开。</p>
     </div>`;
   $("#s-save").onclick = async () => {
-    await api("/api/settings", { method: "POST", body: JSON.stringify({ ddpAppId: $("#s-appid").value, ddpSecret: $("#s-secret").value, outboundProxy: $("#s-proxy").value }) });
+    await api("/api/settings", { method: "POST", body: JSON.stringify({
+      ddpAppId: $("#s-appid").value, ddpSecret: $("#s-secret").value,
+      outboundProxy: $("#s-proxy").value,
+      llmBaseUrl: $("#s-llmurl").value, llmApiKey: $("#s-llmkey").value,
+      llmModel: $("#s-llmmodel").value, aiSubEnabled: $("#s-aisub").checked ? "true" : "false" }) });
     $("#s-save").textContent = "已保存 ✓（代理需 anime restart）";
     setTimeout(() => $("#s-save").textContent = "保存", 2500);
+  };
+  $("#s-test").onclick = async () => {
+    await api("/api/settings", { method: "POST", body: JSON.stringify({
+      llmBaseUrl: $("#s-llmurl").value, llmApiKey: $("#s-llmkey").value, llmModel: $("#s-llmmodel").value }) });
+    $("#s-testres").textContent = "测试中…";
+    try {
+      const r = await api("/api/subtitle/test");
+      $("#s-testres").textContent = r.ok ? "✓ 连通，模型回复: " + r.reply : "✗ " + (r.error || "失败");
+      $("#s-testres").style.color = r.ok ? "#7ee787" : "var(--acc2)";
+    } catch (e) { $("#s-testres").textContent = "✗ 请求失败"; }
   };
 }
 

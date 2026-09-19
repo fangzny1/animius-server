@@ -111,7 +111,13 @@ data class DetailDto(
 )
 
 @Serializable
-data class VideoDto(val playUrl: String, val upstream: String, val title: String, val episode: String)
+data class SubtitleDto(val label: String, val lang: String, val url: String)
+
+@Serializable
+data class VideoDto(
+    val playUrl: String, val upstream: String, val title: String, val episode: String,
+    val subtitles: List<SubtitleDto> = emptyList(),
+)
 
 @Serializable
 data class DanmakuCommentDto(val time: Double, val mode: Int, val color: Long, val text: String)
@@ -350,8 +356,33 @@ fun Application.module() {
                 upstream = bean.videoUrl,
                 title = call.request.queryParameters["title"] ?: "",
                 episode = call.request.queryParameters["ep"] ?: "",
+                subtitles = bean.subtitles.map {
+                    SubtitleDto(it.label, it.lang, "/api/subtitle?u=${b64(it.url)}")
+                },
             )
             call.respondText(Json.encodeToString(VideoDto.serializer(), dto), ContentType.Application.Json)
+        }
+
+        // ---------- 字幕（原始 / AI 双语） ----------
+        get("/api/subtitle") {
+            call.authed() ?: return@get
+            val u = call.request.queryParameters["u"]?.let { runCatching { unb64(it) }.getOrNull() }
+                ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
+            val referer = originOf(u)
+            val translate = call.request.queryParameters["translate"] == "1"
+            val original = withContext(Dispatchers.IO) { Subtitles.fetchVtt(u, referer) }
+            val body = if (translate && Subtitles.configured()) {
+                withContext(Dispatchers.IO) {
+                    Subtitles.bilingualVtt(u, referer, original, SettingsStore.file.parent)
+                }
+            } else original
+            call.respondText(body, ContentType.parse("text/vtt; charset=utf-8"))
+        }
+        get("/api/subtitle/test") {
+            call.authed() ?: return@get
+            runCatching { Subtitles.testLlm() }
+                .onSuccess { call.respondText("""{"ok":true,"reply":"${it.replace("\"", "'")}"}""", ContentType.Application.Json) }
+                .onFailure { call.respondText("""{"ok":false,"error":"${it.message?.replace("\"", "'")?.take(150)}"}""", ContentType.Application.Json) }
         }
 
         // ---------- 弹幕 ----------
@@ -459,13 +490,17 @@ fun Application.module() {
             }
         }
 
-        // ---------- 设置（弹幕凭据、出站代理等） ----------
+        // ---------- 设置（弹幕凭据、出站代理、LLM 字幕等） ----------
         get("/api/settings") {
             call.authed() ?: return@get
             call.respondText(buildJsonObject {
                 put("ddpAppId", SettingsStore.get("ddpAppId") ?: "")
                 put("ddpSecret", SettingsStore.get("ddpSecret") ?: "")
                 put("outboundProxy", SettingsStore.get("outboundProxy") ?: "")
+                put("llmBaseUrl", SettingsStore.get("llmBaseUrl") ?: "")
+                put("llmApiKey", SettingsStore.get("llmApiKey") ?: "")
+                put("llmModel", SettingsStore.get("llmModel") ?: "")
+                put("aiSubEnabled", SettingsStore.get("aiSubEnabled")?.toBooleanStrictOrNull() ?: false)
             }.toString(), ContentType.Application.Json)
         }
         post("/api/settings") {
@@ -474,6 +509,10 @@ fun Application.module() {
             obj["ddpAppId"]?.jsonPrimitive?.content?.let { SettingsStore.put("ddpAppId", it) }
             obj["ddpSecret"]?.jsonPrimitive?.content?.let { SettingsStore.put("ddpSecret", it) }
             obj["outboundProxy"]?.jsonPrimitive?.content?.let { SettingsStore.put("outboundProxy", it.trim()) }
+            obj["llmBaseUrl"]?.jsonPrimitive?.content?.let { SettingsStore.put("llmBaseUrl", it.trim()) }
+            obj["llmApiKey"]?.jsonPrimitive?.content?.let { SettingsStore.put("llmApiKey", it.trim()) }
+            obj["llmModel"]?.jsonPrimitive?.content?.let { SettingsStore.put("llmModel", it.trim()) }
+            obj["aiSubEnabled"]?.jsonPrimitive?.content?.let { SettingsStore.put("aiSubEnabled", it) }
             call.respondText("""{"ok":true}""", ContentType.Application.Json)
         }
 

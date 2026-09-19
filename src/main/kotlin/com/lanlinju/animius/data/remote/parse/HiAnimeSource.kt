@@ -4,9 +4,11 @@ import com.lanlinju.animius.data.remote.dto.AnimeBean
 import com.lanlinju.animius.data.remote.dto.AnimeDetailBean
 import com.lanlinju.animius.data.remote.dto.EpisodeBean
 import com.lanlinju.animius.data.remote.dto.HomeBean
+import com.lanlinju.animius.data.remote.dto.SubtitleTrack
 import com.lanlinju.animius.data.remote.dto.VideoBean
 import com.lanlinju.animius.util.DownloadManager
 import com.lanlinju.animius.util.getDefaultDomain
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.Json
@@ -100,6 +102,22 @@ object HiAnimeSource : AnimeSource {
             ?: Regex("\"src\"\\s*:\\s*\"([^\"]+)\"").find(decoded)?.groupValues?.get(1)
             ?: throw IllegalStateException("HiAnime: no stream src in blob")
         val ref = Regex("^(https?://[^/]+)").find(embedUrl)?.groupValues?.get(1) ?: baseUrl
-        return VideoBean(videoUrl = src, headers = mapOf("Referer" to ref))
+
+        // 字幕轨（VTT，需带 embed 站 Referer 获取）
+        val subtitles = runCatching {
+            val subsArr = Regex("\"subtitles\"\\s*:\\s*(\\[.*?\\])").find(decoded)?.groupValues?.get(1) ?: "[]"
+            val arr = json.parseToJsonElement(subsArr).jsonArray
+            arr.mapNotNull { el ->
+                val o = el.jsonObject
+                val u = o["src"]?.jsonPrimitive?.content ?: return@mapNotNull null
+                SubtitleTrack(
+                    label = o["label"]?.jsonPrimitive?.content ?: o["lang"]?.jsonPrimitive?.content ?: "字幕",
+                    lang = o["lang"]?.jsonPrimitive?.content ?: "",
+                    url = u,
+                )
+            }
+        }.getOrDefault(emptyList())
+
+        return VideoBean(videoUrl = src, headers = mapOf("Referer" to ref), subtitles = subtitles)
     }
 }
