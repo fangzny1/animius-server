@@ -5,6 +5,7 @@ import com.lanlinju.animius.data.remote.parse.AnimeSource
 import com.lanlinju.animius.data.remote.parse.CycanimeSource
 import com.lanlinju.animius.data.remote.parse.GirigiriSource
 import com.lanlinju.animius.data.remote.parse.GogoanimeSource
+import com.lanlinju.animius.data.remote.parse.HiAnimeSource
 import com.lanlinju.animius.data.remote.parse.GugufanSource
 import com.lanlinju.animius.data.remote.parse.MxdmSource
 import com.lanlinju.animius.data.remote.parse.NtdmSource
@@ -45,6 +46,7 @@ object SourceHolder {
             SourceMode.Xifan -> XifanSource()
             SourceMode.Ntdm -> NtdmSource()
             SourceMode.Gugufan -> GugufanSource()
+            SourceMode.HiAnime -> HiAnimeSource
         }
     }
 }
@@ -60,5 +62,6 @@ enum class SourceMode {
     Ntdm,
     Nyafun,
     Gogoanime,
-    Yhdm
+    Yhdm,
+    HiAnime
 }

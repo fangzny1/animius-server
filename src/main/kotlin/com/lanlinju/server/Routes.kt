@@ -564,4 +564,5 @@ private val sourceDisplayNames = mapOf(
     SourceMode.Xifan to "稀饭动漫 Xifan",
     SourceMode.Ntdm to "NT动漫",
     SourceMode.Gugufan to "咕咕番 Gugufan",
+    SourceMode.HiAnime to "HiAnime (ani-cli 同源)",
 )
