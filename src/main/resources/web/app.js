@@ -229,7 +229,15 @@ async function renderWatch(p) {
   }
   watchCtx = { source: p.source, title: p.title, img: "", animeUrl: p.animeUrl, episodeName: p.epName, episodeUrl: p.epUrl, upstream: v.upstream };
   const isHls = (v.upstream || "").split("?")[0].endsWith(".m3u8");
+  const ST = await api("/api/settings");
+  // bar 模式：底条贴合文字宽度（Artplayer 默认把底条画在整行宽度的容器上）
+  const barCss = (ST.subBg === "bar") ? `<style>
+    .art-subtitle { width: auto !important; left: 50% !important; transform: translateX(-50%) !important; max-width: 94% !important; }
+    .art-subtitle p { display: inline !important; background: rgba(0,0,0,.55) !important; padding: 2px 12px !important; -webkit-box-decoration-break: clone; box-decoration-break: clone; border-radius: 3px; }
+    .art-subtitle p:empty { display: none; }
+  </style>` : "";
   view.innerHTML = `
+    ${barCss}
     <div class="player-wrap"><div id="player"></div></div>
     <div class="row danmaku-toggle">
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="dmk" checked> 弹幕</label>
@@ -299,7 +307,7 @@ async function renderWatch(p) {
   // 字幕区：开关 / 轨道选择 / AI 双语 / 进度（字幕轨由 HiAnime 源提供）
   const subarea = $("#subarea");
   if (v.subtitles && v.subtitles.length) {
-    const st = await api("/api/settings");
+    const st = ST;
     const fontSize = (parseInt(st.subFontSize) || 22);
     const tracks = v.subtitles;
     let cur = tracks.find(t => t.lang === "en") || tracks[0];
@@ -310,7 +318,7 @@ async function renderWatch(p) {
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>`;
     const bgMode = st.subBg || "shadow";
     const subStyle = { color: "#FFE082", fontSize: fontSize + "px" };
-    if (bgMode === "bar") { subStyle.background = "rgba(0,0,0,.45)"; subStyle.padding = "2px 10px"; }
+    if (bgMode === "bar") { /* 底条由 barCss 的 .art-subtitle p 样式绘制，贴合文字 */ }
     else if (bgMode === "outline") { subStyle["-webkit-text-stroke"] = "1.2px #000"; subStyle["text-shadow"] = "0 1px 3px #000"; }
     else { subStyle["text-shadow"] = "0 0 6px #000, 0 2px 6px #000, 1px 1px 2px #000"; }
     let aiOn = $("#subai").checked, polling = false;
