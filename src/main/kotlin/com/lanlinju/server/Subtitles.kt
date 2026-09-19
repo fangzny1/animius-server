@@ -11,18 +11,19 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
-import io.ktor.http.contentType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
-import java.security.MessageDigest
 import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 字幕处理：VTT 解析、LLM 分批翻译、双语合成、磁盘缓存。
@@ -37,8 +38,10 @@ object Subtitles {
         HttpClient(OkHttp) {
             engine {
                 config {
-                    sslSocketFactory(com.lanlinju.animius.util.trustAllContext.socketFactory,
-                        com.lanlinju.animius.util.trustAllCerts[0] as javax.net.ssl.X509TrustManager)
+                    sslSocketFactory(
+                        com.lanlinju.animius.util.trustAllContext.socketFactory,
+                        com.lanlinju.animius.util.trustAllCerts[0] as javax.net.ssl.X509TrustManager
+                    )
                     hostnameVerifier { _, _ -> true }
                 }
             }
@@ -46,16 +49,46 @@ object Subtitles {
         }
     }
 
-    /** 规范化 VTT：清洗内联标签，统一格式（Artplayer 兼容） */
-    fun normalizeVtt(original: String): String {
-        val cues = parseVtt(original)
-        if (cues.isEmpty()) return original
-        return buildBilingualVtt(original, cues, emptyMap())
+    // 字幕拉取客户端：带出站代理（字幕常在被墙 CDN 上）
+    private val vttClient by lazy {
+        HttpClient(OkHttp) {
+            engine {
+                config {
+                    sslSocketFactory(
+                        com.lanlinju.animius.util.trustAllContext.socketFactory,
+                        com.lanlinju.animius.util.trustAllCerts[0] as javax.net.ssl.X509TrustManager
+                    )
+                    hostnameVerifier { _, _ -> true }
+                    runCatching {
+                        SettingsStore.get("outboundProxy")?.takeIf { it.isNotBlank() }?.let { spec ->
+                            val uri = java.net.URI(spec.trim())
+                            val type = if (uri.scheme.startsWith("socks")) java.net.Proxy.Type.SOCKS else java.net.Proxy.Type.HTTP
+                            proxy(java.net.Proxy(type, java.net.InetSocketAddress(uri.host, if (uri.port > 0) uri.port else 8080)))
+                        }
+                    }
+                }
+            }
+            followRedirects = true
+        }
     }
+
+    // VTT 内存缓存：字幕 URL 的签名是一次性的，同 URL 只回源一次
+    private val vttCache = ConcurrentHashMap<String, String>()
+
+    // 翻译进度: hash -> [已完成批次, 总批次]；errors: hash -> 错误信息
+    private val progressMap = ConcurrentHashMap<String, IntArray>()
+    private val errorMap = ConcurrentHashMap<String, String>()
 
     fun configured(): Boolean =
         !SettingsStore.get("llmBaseUrl").isNullOrBlank() &&
             !SettingsStore.get("llmModel").isNullOrBlank()
+
+    /** 规范化 VTT：清洗内联标签，统一格式（Artplayer 兼容） */
+    fun normalizeVtt(original: String): String {
+        val cues = parseVtt(original)
+        if (cues.isEmpty()) return original
+        return buildVtt(cues) { null }
+    }
 
     suspend fun testLlm(): String {
         val base = SettingsStore.get("llmBaseUrl")?.takeIf { it.isNotBlank() }
@@ -72,24 +105,20 @@ object Subtitles {
         return "双语管线 OK: ${reply.joinToString(" / ").take(80)}"
     }
 
+    fun hashOf(u: String): String =
+        MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(24)
+
     private fun cachePath(u: String, dataDir: Path): Path {
         val dir = dataDir.resolve("subtitles")
         dir.toFile().mkdirs()
         return dir.resolve("${hashOf(u)}.vtt")
     }
 
-    fun hashOf(u: String): String =
-        MessageDigest.getInstance("SHA-256").digest(u.toByteArray())
-            .joinToString("") { "%02x".format(it) }.take(24)
-
-    // 翻译进度: hash -> [已完成批次, 总批次]；errors: hash -> 错误信息
-    private val progressMap = java.util.concurrent.ConcurrentHashMap<String, IntArray>()
-    private val errorMap = java.util.concurrent.ConcurrentHashMap<String, String>()
-
     /**
      * 后台启动翻译任务（幂等：已缓存返回 done，进行中返回 running）。
      */
-    fun prepareAsync(url: String, referer: String?, dataDir: Path): kotlinx.serialization.json.JsonObject {
+    fun prepareAsync(url: String, referer: String?, dataDir: Path): JsonObject {
         val hash = hashOf(url)
         if (cachePath(url, dataDir).toFile().exists()) {
             return buildJsonObject { put("status", "done") }
@@ -114,7 +143,7 @@ object Subtitles {
         return buildJsonObject { put("status", "started") }
     }
 
-    fun progressStatus(url: String, dataDir: Path): kotlinx.serialization.json.JsonObject {
+    fun progressStatus(url: String, dataDir: Path): JsonObject {
         val hash = hashOf(url)
         if (cachePath(url, dataDir).toFile().exists()) {
             val p = progressMap[hash]
@@ -125,45 +154,37 @@ object Subtitles {
         return buildJsonObject { put("status", "idle") }
     }
 
-    // 字幕拉取客户端：带出站代理（字幕常在被墙 CDN 上）
-    private val vttClient by lazy {
-        HttpClient(OkHttp) {
-            engine {
-                config {
-                    sslSocketFactory(com.lanlinju.animius.util.trustAllContext.socketFactory,
-                        com.lanlinju.animius.util.trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-                    hostnameVerifier { _, _ -> true }
-                    runCatching {
-                        SettingsStore.get("outboundProxy")?.takeIf { it.isNotBlank() }?.let { spec ->
-                            val uri = java.net.URI(spec.trim())
-                            val type = if (uri.scheme.startsWith("socks")) java.net.Proxy.Type.SOCKS else java.net.Proxy.Type.HTTP
-                            proxy(java.net.Proxy(type, java.net.InetSocketAddress(uri.host, if (uri.port > 0) uri.port else 8080)))
-                        }
-                    }
-                }
-            }
-            followRedirects = true
-        }
-    }
-
-    // VTT 内存缓存：字幕 URL 的签名是一次性的，同 URL 只回源一次
-    private val vttCache = java.util.concurrent.ConcurrentHashMap<String, String>()
-
     suspend fun fetchVtt(url: String, referer: String?): String = withContext(Dispatchers.IO) {
         vttCache[url]?.let { return@withContext it }
-        try {
-            val body = vttClient.get(url) {
-                headers {
-                    append(HttpHeaders.UserAgent, com.lanlinju.animius.util.DefaultUserAgent)
-                    if (!referer.isNullOrBlank()) append("Referer", referer)
+        var lastError: Exception? = null
+        // 新签名 URL 偶发先回 403/限流页，稍候重试即可
+        repeat(3) { attempt ->
+            try {
+                val body = vttClient.get(url) {
+                    headers {
+                        append(HttpHeaders.UserAgent, com.lanlinju.animius.util.DefaultUserAgent)
+                        if (!referer.isNullOrBlank()) append("Referer", referer)
+                    }
+                }.bodyAsText().let { raw ->
+                    // 剥 UTF-8 BOM（Kotlin 的 trimStart 不认 BOM，需显式指定）
+                    val bom = 0xFEFF.toChar()
+                    if (raw.firstOrNull() == bom) raw.substring(1) else raw
                 }
-            }.bodyAsText()
-            if (vttCache.size > 30) vttCache.clear()
-            vttCache[url] = body
-            body
-        } catch (e: Exception) {
-            throw IllegalStateException("字幕拉取失败（CDN 可能需要出站代理）: ${e.message?.take(120)}")
+                // CDN 限流/签名过期时可能返回 200 + HTML 错误页，绝不能缓存或端给播放器
+                if (!body.startsWith("WEBVTT")) {
+                    throw IllegalStateException("字幕内容异常 head=「" + body.take(40) + "」")
+                }
+                if (vttCache.size > 30) vttCache.clear()
+                vttCache[url] = body
+                return@withContext body
+            } catch (e: Exception) {
+                lastError = e
+                kotlinx.coroutines.delay(1200L * (attempt + 1))
+            }
         }
+        throw IllegalStateException(
+            "字幕拉取失败（CDN 可能需要出站代理/稍后重试）: " + (lastError?.message?.take(120) ?: "unknown")
+        )
     }
 
     fun cacheStats(dataDir: Path): Pair<Int, Long> {
@@ -209,9 +230,9 @@ object Subtitles {
             done += batch.size
             progressMap[hashOf(url)]?.let { it[0] = bi + 1 }
             // 每批写一次进度缓存，避免中途失败全丢
-            cache.toFile().writeText(buildBilingualVtt(original, cues, texts.zip(translated).toMap()))
+            cache.toFile().writeText(buildVtt(cues) { i -> translated.getOrNull(i)?.takeIf { it.isNotBlank() } })
         }
-        val result = buildBilingualVtt(original, cues, texts.zip(translated).toMap())
+        val result = buildVtt(cues) { i -> translated.getOrNull(i)?.takeIf { it.isNotBlank() } }
         cache.toFile().writeText(result)
         return result
     }
@@ -285,23 +306,15 @@ object Subtitles {
         return cues
     }
 
-    private fun buildBilingualVtt(original: String, cues: List<Cue>, translations: Map<String, String>): String {
-        val sb = StringBuilder("WEBVTT\n\n")
-        var i = 0
-        for (block in original.replace("\r\n", "\n").split("\n\n")) {
-            val lines = block.lines()
-            if (lines.isEmpty() || lines[0].startsWith("WEBVTT") || lines[0].startsWith("NOTE")) {
-                continue
-            }
-            val timingIdx = lines.indexOfFirst { " --> " in it }
-            if (timingIdx < 0) continue
-            val text = lines.drop(timingIdx + 1).joinToString("\n").trim()
-            val cn = translations[text] ?: ""
-            sb.append(++i).append('\n')
-            sb.append(lines[timingIdx]).append('\n')
-            if (cn.isNotBlank() && cn != text) sb.append(text).append('\n').append(cn).append('\n')
-            else sb.append(text).append('\n')
-            sb.append('\n')
+    /** translation(i) 返回第 i 条 cue 的中文（null 则只显示原文）。行尾用 CRLF：与源站 VTT 一致，Artplayer 解析器按 CRLF 分块 */
+    private fun buildVtt(cues: List<Cue>, translation: (Int) -> String?): String {
+        val sb = StringBuilder("WEBVTT\r\n\r\n")
+        cues.forEachIndexed { i, cue ->
+            sb.append(cue.timing).append("\r\n")
+            val cn = translation(i)
+            if (!cn.isNullOrBlank() && cn != cue.text) sb.append(cue.text).append("\r\n").append(cn).append("\r\n")
+            else sb.append(cue.text).append("\r\n")
+            sb.append("\r\n")
         }
         return sb.toString()
     }

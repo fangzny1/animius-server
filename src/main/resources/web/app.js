@@ -230,6 +230,15 @@ async function renderWatch(p) {
   watchCtx = { source: p.source, title: p.title, img: "", animeUrl: p.animeUrl, episodeName: p.epName, episodeUrl: p.epUrl, upstream: v.upstream };
   const isHls = (v.upstream || "").split("?")[0].endsWith(".m3u8");
   const ST = await api("/api/settings");
+  const subFontSize = (parseInt(ST.subFontSize) || 22);
+  const subBgMode = ST.subBg || "shadow";
+  const subTracks = v.subtitles || [];
+  // 默认轨：英文优先（配合 AI 双语学习），无英文取第一轨
+  const defaultTrack = subTracks.find(t => t.lang === "en") || subTracks[0] || null;
+  const subStyleBase = { color: "#FFE082", fontSize: subFontSize + "px" };
+  if (subBgMode === "bar") { /* 底条由 barCss 绘制 */ }
+  else if (subBgMode === "outline") { subStyleBase["-webkit-text-stroke"] = "1.2px #000"; subStyleBase["text-shadow"] = "0 1px 3px #000"; }
+  else { subStyleBase["text-shadow"] = "0 0 6px #000, 0 2px 6px #000, 1px 1px 2px #000"; }
   // bar 模式：底条贴合文字宽度（Artplayer 默认把底条画在整行宽度的容器上）
   const barCss = (ST.subBg === "bar") ? `<style>
     .art-subtitle { width: auto !important; left: 50% !important; transform: translateX(-50%) !important; max-width: 94% !important; }
@@ -255,9 +264,9 @@ async function renderWatch(p) {
     volume: 0.7, autoplay: true, setting: true, playbackRate: true, aspectRatio: true, flip: true,
     fullscreen: true, fullscreenWeb: true, miniProgressBar: true, airplay: true, pip: true,
     autoOrientation: true, autoSize: false,
-    subtitle: v.subtitles && v.subtitles.length ? {
-      url: v.subtitles[0].url, type: "vtt", encoding: "utf-8",
-      style: { color: "#FFE082", "text-shadow": "0 0 4px #000, 0 2px 4px #000", background: "rgba(0,0,0,.45)", fontSize: "22px" },
+    subtitle: defaultTrack ? {
+      url: defaultTrack.url, name: "animius", type: "vtt", escape: false, encoding: "utf-8",
+      style: subStyleBase, onVttLoad: (v) => v,
     } : undefined,
     customType: {
       m3u8: function (video, url) {
@@ -306,23 +315,19 @@ async function renderWatch(p) {
 
   // 字幕区：开关 / 轨道选择 / AI 双语 / 进度（字幕轨由 HiAnime 源提供）
   const subarea = $("#subarea");
-  if (v.subtitles && v.subtitles.length) {
+  if (subTracks.length) {
     const st = ST;
-    const fontSize = (parseInt(st.subFontSize) || 22);
-    const tracks = v.subtitles;
-    let cur = tracks.find(t => t.lang === "en") || tracks[0];
+    const fontSize = subFontSize;
+    const tracks = subTracks;
+    let cur = defaultTrack;
     const zhTrack = tracks.find(t => t.lang === "zh");
     subarea.innerHTML = `
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subon" checked> 字幕</label>
       ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${t.url}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>`;
-    const bgMode = st.subBg || "shadow";
-    const subStyle = { color: "#FFE082", fontSize: fontSize + "px" };
-    if (bgMode === "bar") { /* 底条由 barCss 的 .art-subtitle p 样式绘制，贴合文字 */ }
-    else if (bgMode === "outline") { subStyle["-webkit-text-stroke"] = "1.2px #000"; subStyle["text-shadow"] = "0 1px 3px #000"; }
-    else { subStyle["text-shadow"] = "0 0 6px #000, 0 2px 6px #000, 1px 1px 2px #000"; }
+    const subStyle = subStyleBase;
     let aiOn = $("#subai").checked, polling = false;
-    const applySub = (url) => { try { art.subtitle.update({ url, type: "vtt", style: subStyle }); } catch (e) {} };
+    const applySub = (url) => { try { art.subtitle.switch(url); } catch (e) {} };
     const showSub = (on) => {
       try { art.subtitle.show = on; } catch (e) {}
       const el = document.querySelector(".art-subtitle"); if (el) el.style.display = on ? "" : "none";

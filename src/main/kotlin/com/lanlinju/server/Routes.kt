@@ -244,6 +244,7 @@ fun Application.module() {
         get("/") {
             val html = javaClass.classLoader.getResourceAsStream("web/index.html")?.readBytes()
                 ?.toString(Charsets.UTF_8) ?: "<h1>web/index.html missing</h1>"
+            call.response.headers.append(HttpHeaders.CacheControl, "no-cache")
             call.respondText(html, ContentType.Text.Html)
         }
         staticResources("/static", "web")
