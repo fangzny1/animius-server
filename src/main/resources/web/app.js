@@ -308,7 +308,11 @@ async function renderWatch(p) {
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subon" checked> 字幕</label>
       ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${t.url}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>`;
-    const subStyle = { color: "#FFE082", "text-shadow": "0 0 4px #000, 0 2px 4px #000", background: "rgba(0,0,0,.45)", fontSize: fontSize + "px" };
+    const bgMode = st.subBg || "shadow";
+    const subStyle = { color: "#FFE082", fontSize: fontSize + "px" };
+    if (bgMode === "bar") { subStyle.background = "rgba(0,0,0,.45)"; subStyle.padding = "2px 10px"; }
+    else if (bgMode === "outline") { subStyle["-webkit-text-stroke"] = "1.2px #000"; subStyle["text-shadow"] = "0 1px 3px #000"; }
+    else { subStyle["text-shadow"] = "0 0 6px #000, 0 2px 6px #000, 1px 1px 2px #000"; }
     let aiOn = $("#subai").checked, polling = false;
     const applySub = (url) => { try { art.subtitle.update({ url, type: "vtt", style: subStyle }); } catch (e) {} };
     const showSub = (on) => {
@@ -412,6 +416,12 @@ async function renderSettings() {
       <label><input type="checkbox" id="s-aisub" ${s.aiSubEnabled ? "checked" : ""}> 播放时自动翻译为双语字幕（原文+中文）</label>
       <label>字幕字号（px）</label>
       <input type="text" id="s-subsize" value="${raw(s.subFontSize || "22")}">
+      <label>字幕背景</label>
+      <select id="s-subbg">
+        <option value="shadow" ${s.subBg !== "bar" && s.subBg !== "outline" ? "selected" : ""}>纯阴影（不遮挡画面，推荐）</option>
+        <option value="bar" ${s.subBg === "bar" ? "selected" : ""}>半透明底条</option>
+        <option value="outline" ${s.subBg === "outline" ? "selected" : ""}>黑色描边</option>
+      </select>
       <label>API Base（如 https://api.deepseek.com/v1 或 http://127.0.0.1:8080/v1）</label>
       <input type="text" id="s-llmurl" value="${raw(s.llmBaseUrl || "")}">
       <label>API Key</label>
@@ -434,7 +444,7 @@ async function renderSettings() {
       ddpAppId: $("#s-appid").value, ddpSecret: $("#s-secret").value,
       outboundProxy: $("#s-proxy").value,
       llmBaseUrl: $("#s-llmurl").value, llmApiKey: $("#s-llmkey").value,
-      llmModel: $("#s-llmmodel").value, aiSubEnabled: $("#s-aisub").checked ? "true" : "false", subFontSize: $("#s-subsize").value }) });
+      llmModel: $("#s-llmmodel").value, aiSubEnabled: $("#s-aisub").checked ? "true" : "false", subFontSize: $("#s-subsize").value, subBg: $("#s-subbg").value }) });
     $("#s-save").textContent = "已保存 ✓（代理需 anime restart）";
     setTimeout(() => $("#s-save").textContent = "保存", 2500);
   };

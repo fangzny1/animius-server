@@ -525,6 +525,7 @@ fun Application.module() {
                 put("llmModel", SettingsStore.get("llmModel") ?: "")
                 put("aiSubEnabled", SettingsStore.get("aiSubEnabled")?.toBooleanStrictOrNull() ?: false)
                 put("subFontSize", SettingsStore.get("subFontSize") ?: "22")
+                put("subBg", SettingsStore.get("subBg") ?: "shadow")
             }.toString(), ContentType.Application.Json)
         }
         post("/api/settings") {
@@ -538,6 +539,7 @@ fun Application.module() {
             obj["llmModel"]?.jsonPrimitive?.content?.let { SettingsStore.put("llmModel", it.trim()) }
             obj["aiSubEnabled"]?.jsonPrimitive?.content?.let { SettingsStore.put("aiSubEnabled", it) }
             obj["subFontSize"]?.jsonPrimitive?.content?.let { SettingsStore.put("subFontSize", it.filter { c -> c.isDigit() }.ifBlank { "22" }) }
+            obj["subBg"]?.jsonPrimitive?.content?.let { SettingsStore.put("subBg", it.take(10)) }
             call.respondText("""{"ok":true}""", ContentType.Application.Json)
         }
 
