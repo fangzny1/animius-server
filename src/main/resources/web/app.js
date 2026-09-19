@@ -303,10 +303,11 @@ async function renderWatch(p) {
     const fontSize = (parseInt(st.subFontSize) || 22);
     const tracks = v.subtitles;
     let cur = tracks.find(t => t.lang === "en") || tracks[0];
+    const zhTrack = tracks.find(t => t.lang === "zh");
     subarea.innerHTML = `
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subon" checked> 字幕</label>
       ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${t.url}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
-      <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> AI双语</label>`;
+      <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>`;
     const subStyle = { color: "#FFE082", "text-shadow": "0 0 4px #000, 0 2px 4px #000", background: "rgba(0,0,0,.45)", fontSize: fontSize + "px" };
     let aiOn = $("#subai").checked, polling = false;
     const applySub = (url) => { try { art.subtitle.update({ url, type: "vtt", style: subStyle }); } catch (e) {} };
@@ -328,7 +329,12 @@ async function renderWatch(p) {
     };
     $("#subai").onchange = (e) => {
       aiOn = e.target.checked;
-      if (aiOn) startAI();
+      if (aiOn && zhTrack) {
+        cur = zhTrack;
+        if (trSel) trSel.value = zhTrack.url;
+        applySub(zhTrack.url);
+        setHint("自带中文字幕 ✓（无需 AI 翻译）");
+      } else if (aiOn) startAI();
       else { applySub(cur.url); setHint("字幕: " + cur.label); }
     };
     async function startAI() {
@@ -351,7 +357,10 @@ async function renderWatch(p) {
       } catch (e) { setHint("AI双语失败: " + e.message); }
       polling = false;
     }
-    if (aiOn) startAI();
+    if (aiOn) {
+      if (zhTrack) { cur = zhTrack; applySub(zhTrack.url); setHint("自带中文字幕 ✓（无需 AI 翻译）"); }
+      else startAI();
+    }
   } else {
     subarea.innerHTML = '<span id="subhint" style="color:var(--dim);font-size:13px">该源无字幕轨（字幕由 HiAnime 源提供）</span>';
   }
@@ -414,6 +423,9 @@ async function renderSettings() {
         <button class="btn ghost" id="s-test">测试 LLM 连接</button>
         <span id="s-testres" style="color:var(--dim);font-size:13px"></span>
       </div>
+      <h2 class="sect">字幕缓存</h2>
+      <p class="tip" id="s-subcache">统计中…</p>
+      <button class="btn ghost" id="s-subclear">清空双语字幕缓存</button>
       <p class="tip">弹弹play 申请地址：https://api.dandanplay.net/register<br>
       字幕翻译走 OpenAI 兼容接口（chat/completions），本地 llama.cpp/ollama 也可以；字幕按集缓存，翻过的集秒开。</p>
     </div>`;
@@ -425,6 +437,13 @@ async function renderSettings() {
       llmModel: $("#s-llmmodel").value, aiSubEnabled: $("#s-aisub").checked ? "true" : "false", subFontSize: $("#s-subsize").value }) });
     $("#s-save").textContent = "已保存 ✓（代理需 anime restart）";
     setTimeout(() => $("#s-save").textContent = "保存", 2500);
+  };
+  api("/api/subtitle/cache").then(c => {
+    $("#s-subcache").textContent = `已缓存 ${c.count} 集双语字幕，共 ${(c.bytes / 1048576).toFixed(1)} MB`;
+  }).catch(() => {});
+  $("#s-subclear").onclick = async () => {
+    const r = await api("/api/subtitle/cache/clear", { method: "POST" });
+    $("#s-subcache").textContent = `已清空（移除 ${r.removed} 个文件）`;
   };
   $("#s-test").onclick = async () => {
     await api("/api/settings", { method: "POST", body: JSON.stringify({

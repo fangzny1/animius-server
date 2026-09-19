@@ -46,6 +46,13 @@ object Subtitles {
         }
     }
 
+    /** 规范化 VTT：清洗内联标签，统一格式（Artplayer 兼容） */
+    fun normalizeVtt(original: String): String {
+        val cues = parseVtt(original)
+        if (cues.isEmpty()) return original
+        return buildBilingualVtt(original, cues, emptyMap())
+    }
+
     fun configured(): Boolean =
         !SettingsStore.get("llmBaseUrl").isNullOrBlank() &&
             !SettingsStore.get("llmModel").isNullOrBlank()
@@ -139,17 +146,38 @@ object Subtitles {
         }
     }
 
+    // VTT 内存缓存：字幕 URL 的签名是一次性的，同 URL 只回源一次
+    private val vttCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     suspend fun fetchVtt(url: String, referer: String?): String = withContext(Dispatchers.IO) {
+        vttCache[url]?.let { return@withContext it }
         try {
-            vttClient.get(url) {
+            val body = vttClient.get(url) {
                 headers {
                     append(HttpHeaders.UserAgent, com.lanlinju.animius.util.DefaultUserAgent)
                     if (!referer.isNullOrBlank()) append("Referer", referer)
                 }
             }.bodyAsText()
+            if (vttCache.size > 30) vttCache.clear()
+            vttCache[url] = body
+            body
         } catch (e: Exception) {
             throw IllegalStateException("字幕拉取失败（CDN 可能需要出站代理）: ${e.message?.take(120)}")
         }
+    }
+
+    fun cacheStats(dataDir: Path): Pair<Int, Long> {
+        val dir = dataDir.resolve("subtitles").toFile()
+        val files = dir.listFiles { f -> f.extension == "vtt" } ?: return 0 to 0
+        return files.size to files.sumOf { it.length() }
+    }
+
+    fun clearCache(dataDir: Path): Int {
+        val dir = dataDir.resolve("subtitles").toFile()
+        val files = dir.listFiles { f -> f.extension == "vtt" } ?: return 0
+        val n = files.size
+        files.forEach { it.delete() }
+        return n
     }
 
     /**
@@ -249,7 +277,9 @@ object Subtitles {
             if (lines[0].startsWith("WEBVTT") || lines[0].startsWith("NOTE")) continue
             val timingIdx = lines.indexOfFirst { " --> " in it }
             if (timingIdx < 0) continue
-            val text = lines.drop(timingIdx + 1).joinToString("\n").trim()
+            // 去掉内联标签（<c.xxx> 等），Artplayer 的字幕解析器不认
+            val text = lines.drop(timingIdx + 1).joinToString("\n")
+                .replace(Regex("<[^>]+>"), "").trim()
             if (text.isNotBlank()) cues.add(Cue(lines[timingIdx], text))
         }
         return cues

@@ -375,8 +375,18 @@ fun Application.module() {
                 withContext(Dispatchers.IO) {
                     Subtitles.bilingualVtt(u, referer, original, SettingsStore.file.parent)
                 }
-            } else original
+            } else Subtitles.normalizeVtt(original)
             call.respondText(body, ContentType.parse("text/vtt; charset=utf-8"))
+        }
+        get("/api/subtitle/cache") {
+            call.authed() ?: return@get
+            val (count, bytes) = Subtitles.cacheStats(SettingsStore.file.parent)
+            call.respondText("""{"count":$count,"bytes":$bytes}""", ContentType.Application.Json)
+        }
+        post("/api/subtitle/cache/clear") {
+            call.authed() ?: return@post
+            val n = Subtitles.clearCache(SettingsStore.file.parent)
+            call.respondText("""{"ok":true,"removed":$n}""", ContentType.Application.Json)
         }
         // 后台启动翻译（幂等），配合 progress 轮询显示进度
         get("/api/subtitle/prepare") {

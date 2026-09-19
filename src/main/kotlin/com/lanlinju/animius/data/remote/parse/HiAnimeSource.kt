@@ -27,6 +27,19 @@ object HiAnimeSource : AnimeSource {
     private val json = Json { ignoreUnknownKeys = true }
     private val BLOB_KEY = "otaku-embed-v1".toByteArray()
 
+    private fun langFromLabel(label: String): String {
+        val l = label.lowercase()
+        return when {
+            "chinese" in l || "中文" in label || "简体" in label || "繁體" in label || "繁体" in label -> "zh"
+            "english" in l -> "en"
+            "japanese" in l || "日本" in label -> "ja"
+            "korean" in l || "한국" in label -> "ko"
+            "malay" in l || "melayu" in l -> "ms"
+            l.isNotBlank() -> l.substringBefore(' ').take(2)
+            else -> "en"
+        }
+    }
+
     private fun cardToAnime(a: org.jsoup.nodes.Element, sourceBase: String): AnimeBean? {
         val href = a.attr("href").ifBlank { return null }
         val tail = href.substringAfterLast('/').trimEnd('/')
@@ -110,11 +123,8 @@ object HiAnimeSource : AnimeSource {
             arr.mapNotNull { el ->
                 val o = el.jsonObject
                 val u = o["src"]?.jsonPrimitive?.content ?: return@mapNotNull null
-                SubtitleTrack(
-                    label = o["label"]?.jsonPrimitive?.content ?: o["lang"]?.jsonPrimitive?.content ?: "字幕",
-                    lang = o["lang"]?.jsonPrimitive?.content ?: "",
-                    url = u,
-                )
+                val label = o["label"]?.jsonPrimitive?.content ?: o["lang"]?.jsonPrimitive?.content ?: "字幕"
+                SubtitleTrack(label = label, lang = langFromLabel(label), url = u)
             }
         }.getOrDefault(emptyList())
 
