@@ -23,7 +23,7 @@ button { cursor: pointer; }
 .userbox { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; }
 .userbox button:hover { color: var(--text); }
 
-main { padding: 20px; max-width: 1280px; margin: 0 auto; padding-bottom: 80px; }
+main { padding: 20px; max-width: 1280px; margin: 0 auto; padding-bottom: 24px; }
 
 h2.sect { font-size: 16px; margin: 22px 0 10px; color: var(--dim); }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 14px; }
@@ -101,3 +101,53 @@ select, input[type=text], input[type=password], input[type=search] {
 .captcha-box textarea { width: 100%; margin: 8px 0; background: var(--card); color: var(--text);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 13px; }
 .captcha-box .tip { color: var(--dim); font-size: 13px; }
+
+/* 返回按钮（播放页）：放在内容区左下角，不悬浮，避免遮挡播放器 */
+#playerbar {
+  display: flex; justify-content: flex-start;
+  max-width: 1280px; margin: 0 auto; padding: 0 20px 24px;
+}
+#playerbar button {
+  background: var(--card); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 18px; font-size: 14px;
+}
+
+#subarea { flex-wrap: wrap; }
+
+/* ---------- 移动端适配 ---------- */
+@media (max-width: 640px) {
+  /* topbar 压成单行：logo 缩小、导航横滑（隐藏滚动条）、隐藏用户名 */
+  #topbar {
+    flex-wrap: nowrap; gap: 6px;
+    padding: calc(6px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right)) 6px calc(8px + env(safe-area-inset-left));
+  }
+  .brand { font-size: 14px; white-space: nowrap; }
+  .brand .beta { display: none; }
+  #topbar nav { flex-wrap: nowrap; overflow-x: auto; gap: 2px; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  #topbar nav::-webkit-scrollbar { display: none; }
+  #topbar nav button { flex: 0 0 auto; padding: 7px 9px; font-size: 13px; white-space: nowrap; }
+  .userbox span { display: none; }
+  .userbox button { padding: 7px 8px; font-size: 13px; white-space: nowrap; }
+
+  main { padding: 12px 12px 16px; }
+  h2.sect { font-size: 14px; margin: 16px 0 8px; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; }
+  .card .t { font-size: 12px; padding: 6px 8px; }
+
+  /* 详情页：小封面 + 简介并排，不再各占一行 */
+  .detail { gap: 12px; }
+  .detail .poster { width: 120px; }
+  .detail .info { min-width: 0; }
+  .detail .info h1 { font-size: 17px; }
+  .detail .desc { font-size: 13px; }
+  .eplist { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
+  .chan-tabs button { padding: 6px 10px; font-size: 12px; }
+
+  /* 播放器保持 16:9（去掉 min-height 否则小屏被搮变形） */
+  #player { min-height: 0; }
+  .danmaku-toggle { gap: 8px; font-size: 13px; }
+
+  .login-box { margin: 6vh 12px; padding: 22px; }
+  #playerbar { padding: 0 12px 16px; }
+  .settings-box label { margin: 12px 0 5px; }
+}
