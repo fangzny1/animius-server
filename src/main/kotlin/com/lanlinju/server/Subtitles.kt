@@ -15,7 +15,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -78,6 +81,8 @@ object Subtitles {
     // 翻译进度: hash -> [已完成批次, 总批次]；errors: hash -> 错误信息
     private val progressMap = ConcurrentHashMap<String, IntArray>()
     private val errorMap = ConcurrentHashMap<String, String>()
+    // 正在翻译的 hash（去重用，防止同集并发触发多个翻译任务）
+    private val inflight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     fun configured(): Boolean =
         !SettingsStore.get("llmBaseUrl").isNullOrBlank() &&
@@ -115,14 +120,47 @@ object Subtitles {
         return dir.resolve("${key.replace(Regex("[^a-zA-Z0-9]"), "").take(40)}.vtt")
     }
 
+    /** 统一缓存键：显式 cacheKey 优先（按轨道稳定，签名换新也不变），否则按源 URL 哈希 */
+    private fun keyOf(url: String, cacheKey: String?): String = cacheKey ?: hashOf(url)
+
+    /** 翻译进度快照（半成品），完成后删除；只认最终 .vtt 为成品 */
+    private fun partPath(key: String, dataDir: Path): Path {
+        val c = cachePath(key, dataDir)
+        return c.resolveSibling(c.fileName.toString() + ".part.json")
+    }
+
+    /** 已缓存的完整双语字幕；没有（或读失败）返回 null */
+    fun cachedBilingual(key: String, dataDir: Path): String? =
+        cachePath(key, dataDir).toFile().takeIf { it.exists() }?.let { runCatching { it.readText() }.getOrNull() }
+
+    private class Part(val done: Int, val total: Int, val t: List<String?>)
+
+    private fun readPart(file: java.io.File): Part? = runCatching {
+        val o = json.parseToJsonElement(file.readText()).jsonObject
+        Part(
+            o["done"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+            o["total"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+            o["t"]!!.jsonArray.map { el -> if (el is JsonNull) null else el.jsonPrimitive.content },
+        )
+    }.getOrNull()
+
+    private fun writePart(file: java.io.File, done: Int, total: Int, t: List<String?>) {
+        runCatching {
+            file.writeText(buildJsonObject {
+                put("done", done)
+                put("total", total)
+                put("t", JsonArray(t.map { s -> if (s.isNullOrBlank()) JsonNull else JsonPrimitive(s) }))
+            }.toString())
+        }
+    }
+
     /**
      * 后台启动翻译任务（幂等：已缓存返回 done，进行中返回 running）。
      */
     fun prepareAsync(url: String, referer: String?, dataDir: Path, cacheKey: String? = null): JsonObject {
-        val hash = cacheKey ?: hashOf(url)
-        if (cachePath(hash, dataDir).toFile().exists()) {
-            return buildJsonObject { put("status", "done") }
-        }
+        val hash = keyOf(url, cacheKey)
+        // 只认完整成品；半成品不算 done，允许续翻
+        cachedBilingual(hash, dataDir)?.let { return buildJsonObject { put("status", "done") } }
         errorMap.remove(hash)
         val existing = progressMap[hash]
         if (existing != null && existing[0] < existing[1]) {
@@ -131,26 +169,39 @@ object Subtitles {
         if (!configured()) {
             return buildJsonObject { put("status", "error"); put("error", "LLM 未配置") }
         }
+        // 同一集的翻译任务去重，防止重复点击/换轨来回触发并发翻译
+        if (!inflight.add(hash)) {
+            return buildJsonObject { put("status", "running"); put("done", 0); put("total", 0) }
+        }
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-            runCatching {
+            try {
                 val original = fetchVtt(url, referer)
                 bilingualVtt(url, referer, original, dataDir, cacheKey)
-            }.onFailure {
+            } catch (it: Throwable) {
                 errorMap[hash] = it.message ?: it.javaClass.simpleName
                 progressMap.remove(hash)
+            } finally {
+                inflight.remove(hash)
             }
         }
         return buildJsonObject { put("status", "started") }
     }
 
     fun progressStatus(url: String, dataDir: Path, cacheKey: String? = null): JsonObject {
-        val hash = cacheKey ?: hashOf(url)
-        if (cachePath(hash, dataDir).toFile().exists()) {
+        val hash = keyOf(url, cacheKey)
+        if (cachedBilingual(hash, dataDir) != null) {
             val p = progressMap[hash]
             return buildJsonObject { put("status", "done"); put("done", p?.get(0) ?: 1); put("total", p?.get(1) ?: 1) }
         }
         errorMap[hash]?.let { return buildJsonObject { put("status", "error"); put("error", it.take(150)) } }
         progressMap[hash]?.let { return buildJsonObject { put("status", "running"); put("done", it[0]); put("total", it[1]) } }
+        // 有进度快照或任务在跑（正在拉 VTT、进度尚未登记）都算 running，前端别当 idle 死等
+        if (inflight.contains(hash)) {
+            val part = readPart(partPath(hash, dataDir).toFile())
+            return buildJsonObject {
+                put("status", "running"); put("done", part?.done ?: 0); put("total", part?.total ?: 0)
+            }
+        }
         return buildJsonObject { put("status", "idle") }
     }
 
@@ -195,8 +246,8 @@ object Subtitles {
 
     fun clearCache(dataDir: Path): Int {
         val dir = dataDir.resolve("subtitles").toFile()
-        val files = dir.listFiles { f -> f.extension == "vtt" } ?: return 0
-        val n = files.size
+        val files = dir.listFiles { f -> f.extension == "vtt" || f.name.endsWith(".part.json") } ?: return 0
+        val n = files.count { it.extension == "vtt" }
         files.forEach { it.delete() }
         return n
     }
@@ -205,36 +256,45 @@ object Subtitles {
      * 返回双语 VTT：翻译结果按源 URL 缓存；LLM 未配置时返回原文。
      */
     suspend fun bilingualVtt(url: String, referer: String?, original: String, dataDir: Path, cacheKey: String? = null): String {
+        val pk = keyOf(url, cacheKey)
+        cachedBilingual(pk, dataDir)?.let { return it }
         if (!configured()) return original
-        val cache = cachePath(cacheKey ?: url, dataDir)
-        if (cache.toFile().exists()) return cache.toFile().readText()
 
         val cues = parseVtt(original)
-        val texts = cues.map { it.text }
-        val batchSize = 40
-        var done = 0
-        val translated = texts.toMutableList()
+        if (cues.isEmpty()) return original
+        val cache = cachePath(pk, dataDir)
+        val part = partPath(pk, dataDir).toFile()
+
         val base = SettingsStore.get("llmBaseUrl")!!.trim().trimEnd('/')
-        val key = SettingsStore.get("llmApiKey") ?: ""
+        val llmKey = SettingsStore.get("llmApiKey") ?: ""
         val model = SettingsStore.get("llmModel")!!.trim()
 
-        val batches = texts.chunked(batchSize)
-        val pk = cacheKey ?: hashOf(url)
-        progressMap[pk] = intArrayOf(0, batches.size)
+        val batchSize = 40
+        val batches = cues.indices.toList().chunked(batchSize)
+
+        // 恢复上次中断的半成品（条数对得上才认，防止换轨/换源错位），中断的批可续翻
+        val saved = readPart(part)?.takeIf { it.t.size == cues.size && it.total == batches.size }
+        val translated = MutableList<String?>(cues.size) { saved?.t?.get(it)?.takeIf { s -> s.isNotBlank() } }
+        progressMap[pk] = intArrayOf(saved?.done ?: 0, batches.size)
+
         batches.forEachIndexed { bi, batch ->
-            val numbered = batch.mapIndexed { i, t -> "${i + 1}. ${t.replace('\n', ' ')}" }.joinToString("\n")
-            val reply = chatWithRetry(base, key, model, numbered)
-            reply.forEachIndexed { i, t ->
-                val idx = done + i
-                if (idx < translated.size && t.isNotBlank()) translated[idx] = t
+            val pending = batch.filter { translated[it].isNullOrBlank() }
+            if (pending.isNotEmpty()) {
+                val numbered = pending.mapIndexed { i, idx -> "${i + 1}. ${cues[idx].text.replace('\n', ' ')}" }.joinToString("\n")
+                val reply = chatWithRetry(base, llmKey, model, numbered)
+                pending.forEachIndexed { i, idx ->
+                    if (i < reply.size && reply[i].isNotBlank()) translated[idx] = reply[i]
+                }
             }
-            done += batch.size
             progressMap[pk]?.let { it[0] = bi + 1 }
-            // 每批写一次进度缓存，避免中途失败全丢
-            cache.toFile().writeText(buildVtt(cues) { i -> translated.getOrNull(i)?.takeIf { it.isNotBlank() } })
+            // 进度只写快照文件（半成品），绝不提前落地正式缓存
+            writePart(part, bi + 1, batches.size, translated)
         }
+
         val result = buildVtt(cues) { i -> translated.getOrNull(i)?.takeIf { it.isNotBlank() } }
-        cache.toFile().writeText(result)
+        cache.toFile().writeText(result)   // 全部完成才落地成品
+        part.delete()
+        progressMap.remove(pk)
         return result
     }
 

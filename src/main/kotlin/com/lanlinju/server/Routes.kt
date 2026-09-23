@@ -372,13 +372,34 @@ fun Application.module() {
             val referer = originOf(u)
             val translate = call.request.queryParameters["translate"] == "1"
             val cacheKey = call.request.queryParameters["k"]?.let { runCatching { unb64(it) }.getOrNull() }
-            val original = withContext(Dispatchers.IO) { Subtitles.fetchVtt(u, referer) }
-            val body = if (translate && Subtitles.configured()) {
-                withContext(Dispatchers.IO) {
-                    Subtitles.bilingualVtt(u, referer, original, SettingsStore.file.parent, cacheKey)
+            val dataDir = SettingsStore.file.parent
+            val wantBilingual = translate && Subtitles.configured()
+            val vttType = ContentType.parse("text/vtt; charset=utf-8")
+            val cacheKeyFull = cacheKey ?: Subtitles.hashOf(u)
+
+            // 缓存优先：签名过期/回源失败时照样能放之前翻好的双语字幕
+            if (wantBilingual) {
+                Subtitles.cachedBilingual(cacheKeyFull, dataDir)?.let {
+                    return@get call.respondText(it, vttType)
                 }
-            } else Subtitles.normalizeVtt(original)
-            call.respondText(body, ContentType.parse("text/vtt; charset=utf-8"))
+            }
+
+            val original = runCatching { withContext(Dispatchers.IO) { Subtitles.fetchVtt(u, referer) } }
+            if (original.isFailure) {
+                // 回源失败：有旧缓存就用旧缓存兑底，否则报错
+                val cached = if (wantBilingual) Subtitles.cachedBilingual(cacheKeyFull, dataDir) else null
+                if (cached != null) return@get call.respondText(cached, vttType)
+                return@get call.respondText(
+                    "字幕拉取失败: ${original.exceptionOrNull()?.message?.take(150)}",
+                    ContentType.Text.Plain, HttpStatusCode.BadGateway,
+                )
+            }
+            val body = if (wantBilingual) {
+                withContext(Dispatchers.IO) {
+                    Subtitles.bilingualVtt(u, referer, original.getOrThrow(), dataDir, cacheKey)
+                }
+            } else Subtitles.normalizeVtt(original.getOrThrow())
+            call.respondText(body, vttType)
         }
         get("/api/subtitle/cache") {
             call.authed() ?: return@get
