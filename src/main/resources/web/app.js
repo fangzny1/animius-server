@@ -322,7 +322,7 @@ async function renderWatch(p) {
     const zhTrack = tracks.find(t => t.lang === "zh");
     subarea.innerHTML = `
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subon" checked> 字幕</label>
-      ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${t.url}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
+      ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${esc(t.label)}|${esc(t.lang)}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>`;
     let aiOn = $("#subai").checked, aiGen = 0;
     const applySub = (url) => { try { art.subtitle.switch(url); } catch (e) {} };
@@ -343,7 +343,7 @@ async function renderWatch(p) {
         if (t2 && t2.url !== track.url) {
           track.url = t2.url;
           const sel = document.querySelector("#subtrack");
-          if (sel) { sel.value = t2.url; }
+          if (sel) { sel.value = track.label + "|" + track.lang; }  // 选项按 label|lang 匹配，不依赖会变的 URL
           return true;
         }
       } catch (e) {}
@@ -368,12 +368,12 @@ async function renderWatch(p) {
     };
     const subKey = (track) => {
       const q = new URLSearchParams(track.url.split("?")[1]);
-      return "u=" + (q.get("u") || "") + (q.get("k") ? "&k=" + q.get("k") : "");
+      return "u=" + encodeURIComponent(q.get("u") || "") + (q.get("k") ? "&k=" + encodeURIComponent(q.get("k")) : "");
     };
     $("#subon").onchange = (e) => showSub(e.target.checked);
     const trSel = $("#subtrack");
     if (trSel) trSel.onchange = async (e) => {
-      cur = tracks.find(t => t.url === e.target.value) || cur;
+      cur = tracks.find(t => (t.label + "|" + t.lang) === e.target.value) || cur;
       setHint("字幕: " + cur.label);
       if (aiOn && !zhTrack) await startAI();
       else await loadTrack(cur, false);
@@ -382,7 +382,7 @@ async function renderWatch(p) {
       aiOn = e.target.checked;
       if (aiOn && zhTrack) {
         cur = zhTrack;
-        if (trSel) trSel.value = zhTrack.url;
+        if (trSel) trSel.value = zhTrack.label + "|" + zhTrack.lang;
         await loadTrack(zhTrack, false);
         setHint("自带中文字幕 ✓（无需 AI 翻译）");
       } else if (aiOn) await startAI();

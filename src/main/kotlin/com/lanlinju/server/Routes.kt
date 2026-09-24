@@ -358,7 +358,8 @@ fun Application.module() {
                 title = call.request.queryParameters["title"] ?: "",
                 episode = call.request.queryParameters["ep"] ?: "",
                 subtitles = bean.subtitles.map {
-                    SubtitleDto(it.label, it.lang, "/api/subtitle?u=${b64(it.url)}&k=${b64(it.label + "|" + it.lang)}")
+                    // k = label|lang|集URL：跨重新解析稳定，且按集区分（否则第二集会命中第一集的翻译缓存）
+                    SubtitleDto(it.label, it.lang, "/api/subtitle?u=${b64(it.url)}&k=${b64(it.label + "|" + it.lang + "|" + url)}")
                 },
             )
             call.respondText(Json.encodeToString(VideoDto.serializer(), dto), ContentType.Application.Json)
@@ -375,30 +376,32 @@ fun Application.module() {
             val dataDir = SettingsStore.file.parent
             val wantBilingual = translate && Subtitles.configured()
             val vttType = ContentType.parse("text/vtt; charset=utf-8")
-            val cacheKeyFull = cacheKey ?: Subtitles.hashOf(u)
+            val key = Subtitles.keyOf(u, cacheKey)
 
-            // 缓存优先：签名过期/回源失败时照样能放之前翻好的双语字幕
+            // 缓存优先：签名过期/重看旧集直接放缓存（双语与原文各自缓存，按集区分）
             if (wantBilingual) {
-                Subtitles.cachedBilingual(cacheKeyFull, dataDir)?.let {
-                    return@get call.respondText(it, vttType)
-                }
+                Subtitles.cachedBilingual(key, dataDir)?.let { return@get call.respondText(it, vttType) }
+            } else {
+                Subtitles.cachedOriginal(key, dataDir)?.let { return@get call.respondText(it, vttType) }
             }
 
-            val original = runCatching { withContext(Dispatchers.IO) { Subtitles.fetchVtt(u, referer) } }
-            if (original.isFailure) {
+            val fetched = runCatching { withContext(Dispatchers.IO) { Subtitles.fetchVtt(u, referer) } }
+            if (fetched.isFailure) {
                 // 回源失败：有旧缓存就用旧缓存兑底，否则报错
-                val cached = if (wantBilingual) Subtitles.cachedBilingual(cacheKeyFull, dataDir) else null
+                val cached = if (wantBilingual) Subtitles.cachedBilingual(key, dataDir) else Subtitles.cachedOriginal(key, dataDir)
                 if (cached != null) return@get call.respondText(cached, vttType)
                 return@get call.respondText(
-                    "字幕拉取失败: ${original.exceptionOrNull()?.message?.take(150)}",
+                    "字幕拉取失败: ${fetched.exceptionOrNull()?.message?.take(150)}",
                     ContentType.Text.Plain, HttpStatusCode.BadGateway,
                 )
             }
+            val original = Subtitles.normalizeVtt(fetched.getOrThrow())
+            Subtitles.saveOriginal(key, dataDir, original)   // 记住原文：之后签名过期也能加载/翻译
             val body = if (wantBilingual) {
                 withContext(Dispatchers.IO) {
-                    Subtitles.bilingualVtt(u, referer, original.getOrThrow(), dataDir, cacheKey)
+                    Subtitles.bilingualVtt(u, referer, original, dataDir, cacheKey)
                 }
-            } else Subtitles.normalizeVtt(original.getOrThrow())
+            } else original
             call.respondText(body, vttType)
         }
         get("/api/subtitle/cache") {

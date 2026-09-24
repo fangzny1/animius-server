@@ -120,8 +120,11 @@ object Subtitles {
         return dir.resolve("${key.replace(Regex("[^a-zA-Z0-9]"), "").take(40)}.vtt")
     }
 
-    /** 统一缓存键：显式 cacheKey 优先（按轨道稳定，签名换新也不变），否则按源 URL 哈希 */
-    private fun keyOf(url: String, cacheKey: String?): String = cacheKey ?: hashOf(url)
+    /**
+     * 统一缓存键（再哈希成十六进制）：显式 cacheKey 必须含集数标识（label|lang|集URL，由 /api/video 生成），
+     * 跨重新解析稳定但**按集区分**；否则按源 URL 哈希
+     */
+    fun keyOf(url: String, cacheKey: String?): String = hashOf(cacheKey ?: url)
 
     /** 翻译进度快照（半成品），完成后删除；只认最终 .vtt 为成品 */
     private fun partPath(key: String, dataDir: Path): Path {
@@ -132,6 +135,19 @@ object Subtitles {
     /** 已缓存的完整双语字幕；没有（或读失败）返回 null */
     fun cachedBilingual(key: String, dataDir: Path): String? =
         cachePath(key, dataDir).toFile().takeIf { it.exists() }?.let { runCatching { it.readText() }.getOrNull() }
+
+    /** 原文（规范化 VTT）缓存：同集同轨只回源一次，签名过期后原文/翻译都能继续用 */
+    private fun origPath(key: String, dataDir: Path): Path {
+        val c = cachePath(key, dataDir)
+        return c.resolveSibling(c.fileName.toString().removeSuffix(".vtt") + ".orig")
+    }
+
+    fun cachedOriginal(key: String, dataDir: Path): String? =
+        origPath(key, dataDir).toFile().takeIf { it.exists() }?.let { runCatching { it.readText() }.getOrNull() }
+
+    fun saveOriginal(key: String, dataDir: Path, vtt: String) {
+        runCatching { origPath(key, dataDir).toFile().writeText(vtt) }
+    }
 
     private class Part(val done: Int, val total: Int, val t: List<String?>)
 
@@ -175,7 +191,9 @@ object Subtitles {
         }
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
             try {
-                val original = fetchVtt(url, referer)
+                // 优先用已缓存原文（签名过期也能翻）；没有才回源并落缓存
+                val original = cachedOriginal(hash, dataDir)
+                    ?: fetchVtt(url, referer).also { saveOriginal(hash, dataDir, normalizeVtt(it)) }
                 bilingualVtt(url, referer, original, dataDir, cacheKey)
             } catch (it: Throwable) {
                 errorMap[hash] = it.message ?: it.javaClass.simpleName
@@ -246,7 +264,7 @@ object Subtitles {
 
     fun clearCache(dataDir: Path): Int {
         val dir = dataDir.resolve("subtitles").toFile()
-        val files = dir.listFiles { f -> f.extension == "vtt" || f.name.endsWith(".part.json") } ?: return 0
+        val files = dir.listFiles { f -> f.extension == "vtt" || f.extension == "orig" || f.name.endsWith(".part.json") } ?: return 0
         val n = files.count { it.extension == "vtt" }
         files.forEach { it.delete() }
         return n
