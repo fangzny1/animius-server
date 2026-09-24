@@ -52,16 +52,16 @@ object Subtitles {
         }
     }
 
-    // 字幕拉取客户端：带出站代理（字幕常在被墙 CDN 上）
-    private val vttClient by lazy {
-        HttpClient(OkHttp) {
-            engine {
-                config {
-                    sslSocketFactory(
-                        com.lanlinju.animius.util.trustAllContext.socketFactory,
-                        com.lanlinju.animius.util.trustAllCerts[0] as javax.net.ssl.X509TrustManager
-                    )
-                    hostnameVerifier { _, _ -> true }
+    // 字幕拉取：直连/代理双路自动选（有的字幕 CDN 必须走代理，有的走代理会被 403），按域名记住走哪条
+    private fun vttClientOf(useProxy: Boolean) = HttpClient(OkHttp) {
+        engine {
+            config {
+                sslSocketFactory(
+                    com.lanlinju.animius.util.trustAllContext.socketFactory,
+                    com.lanlinju.animius.util.trustAllCerts[0] as javax.net.ssl.X509TrustManager
+                )
+                hostnameVerifier { _, _ -> true }
+                if (useProxy) {
                     runCatching {
                         SettingsStore.get("outboundProxy")?.takeIf { it.isNotBlank() }?.let { spec ->
                             val uri = java.net.URI(spec.trim())
@@ -71,8 +71,17 @@ object Subtitles {
                     }
                 }
             }
-            followRedirects = true
         }
+        followRedirects = true
+    }
+
+    private val vttDirect by lazy { vttClientOf(useProxy = false) }
+    private val vttProxied by lazy { vttClientOf(useProxy = true) }
+    private val vttRouteMemo = ConcurrentHashMap<String, Boolean>() // host -> 需走代理
+
+    private fun vttClientOrder(url: String): List<HttpClient> {
+        val host = runCatching { java.net.URI(url).host ?: "" }.getOrDefault("")
+        return if (vttRouteMemo[host] == true) listOf(vttProxied, vttDirect) else listOf(vttDirect, vttProxied)
     }
 
     // VTT 内存缓存：字幕 URL 的签名是一次性的，同 URL 只回源一次
@@ -237,9 +246,9 @@ object Subtitles {
             "",
         ).distinct()
         for (ref in candidates) {
-            repeat(2) { attempt ->
+            for (client in vttClientOrder(url)) {
                 try {
-                    val body = vttClient.get(url) {
+                    val body = client.get(url) {
                         headers {
                             append(HttpHeaders.UserAgent, com.lanlinju.animius.util.DefaultUserAgent)
                             if (ref.isNotBlank()) append("Referer", ref)
@@ -253,14 +262,16 @@ object Subtitles {
                     if (!body.startsWith("WEBVTT")) {
                         throw IllegalStateException("字幕内容异常 head=「" + body.take(40) + "」")
                     }
+                    val host = runCatching { java.net.URI(url).host ?: "" }.getOrDefault("")
+                    vttRouteMemo[host] = client === vttProxied   // 记住这个域名走哪条路
                     if (vttCache.size > 30) vttCache.clear()
                     vttCache[url] = body
                     return@withContext body
                 } catch (e: Exception) {
                     lastError = e
-                    kotlinx.coroutines.delay(800L * (attempt + 1))
                 }
             }
+            kotlinx.coroutines.delay(600L)
         }
         throw IllegalStateException(
             "字幕拉取失败（CDN 可能需要出站代理/稍后重试）: " + (lastError?.message?.take(120) ?: "unknown")

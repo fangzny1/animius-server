@@ -73,12 +73,12 @@ private fun ddpClient(): DandanplayClient = DandanplayClient(
     appSecret = SettingsStore.get("ddpSecret") ?: "",
 )
 
-private val proxyClient by lazy {
-    HttpClient(OkHttp) {
-        engine {
-            config {
-                sslSocketFactory(trustAllContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-                hostnameVerifier { _, _ -> true }
+private fun trustfulClient(useProxy: Boolean) = HttpClient(OkHttp) {
+    engine {
+        config {
+            sslSocketFactory(trustAllContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
+            hostnameVerifier { _, _ -> true }
+            if (useProxy) {
                 runCatching {
                     SettingsStore.get("outboundProxy")?.takeIf { it.isNotBlank() }?.let { spec ->
                         val uri = java.net.URI(spec.trim())
@@ -88,8 +88,20 @@ private val proxyClient by lazy {
                 }
             }
         }
-        followRedirects = true
     }
+    followRedirects = true
+}
+
+private val directClient by lazy { trustfulClient(useProxy = false) }
+private val proxyClient by lazy { trustfulClient(useProxy = true) }
+
+// 域名级选路记忆：有的 CDN 必须直连（走代理会被 403，如 ffzy），有的必须走代理（直连不通，如 1embed）
+// 首次探测后记住该域名走哪条路，后续请求不再绕弯
+private val routeMemo = java.util.concurrent.ConcurrentHashMap<String, Boolean>() // host -> 需走代理
+
+private fun clientOrder(u: String): List<HttpClient> {
+    val host = runCatching { java.net.URI(u).host ?: "" }.getOrDefault("")
+    return if (routeMemo[host] == true) listOf(proxyClient, directClient) else listOf(directClient, proxyClient)
 }
 
 // ---------- 前端用的响应 DTO ----------
@@ -582,32 +594,54 @@ fun Application.module() {
                 ?: return@get call.respondText("missing u", HttpStatusCode.UnprocessableEntity.let { ContentType.Text.Plain }, HttpStatusCode.BadRequest)
             val ref = call.request.queryParameters["ref"]?.let { runCatching { unb64(it) }.getOrNull() } ?: originOf(u)
             logger.info("proxy: {}", u)
-            proxyClient.prepareGet(u) {
-                headers {
-                    append(HttpHeaders.UserAgent, DefaultUserAgent)
-                    if (ref.isNotBlank()) append("Referer", ref)
-                    call.request.header(HttpHeaders.Range)?.let { append(HttpHeaders.Range, it) }
-                }
-            }.execute { resp ->
-                // m3u8 判定：URL 含 m3u8（含 m3u8.php 这类动态地址）或 Content-Type 为 mpegurl
-                val isPlaylist = u.contains("m3u8", ignoreCase = true) ||
-                        resp.contentType()?.toString()?.contains("mpegurl") == true
-                if (isPlaylist) {
-                    val text = withContext(Dispatchers.IO) { resp.bodyAsText() }
-                    call.respondText(rewritePlaylist(text, u, ref), ContentType.parse("application/vnd.apple.mpegurl"))
-                } else {
-                    val channel = resp.bodyAsChannel()
-                    resp.headers[HttpHeaders.AcceptRanges]?.let { call.response.headers.append(HttpHeaders.AcceptRanges, it) }
-                    resp.headers[HttpHeaders.ContentRange]?.let { call.response.headers.append(HttpHeaders.ContentRange, it) }
-                    call.respondBytesWriter(
-                        contentType = resp.contentType(),
-                        status = resp.status,
-                        contentLength = resp.contentLength(),
-                    ) {
-                        channel.copyTo(this)
+            val clients = clientOrder(u)
+            var lastErr: Throwable? = null
+            var started = false   // 响应是否已开始写（开始后就不能换路重试）
+            for ((idx, client) in clients.withIndex()) {
+                try {
+                    val viaProxy = client === proxyClient
+                    client.prepareGet(u) {
+                        headers {
+                            append(HttpHeaders.UserAgent, DefaultUserAgent)
+                            if (ref.isNotBlank()) append("Referer", ref)
+                            call.request.header(HttpHeaders.Range)?.let { append(HttpHeaders.Range, it) }
+                        }
+                    }.execute { resp ->
+                        if (resp.status.value !in 200..299 && idx < clients.lastIndex) {
+                            throw IllegalStateException("上游 ${resp.status}，换条路重试")
+                        }
+                        val host = runCatching { java.net.URI(u).host ?: "" }.getOrDefault("")
+                        routeMemo[host] = viaProxy   // 记住这个域名走哪条路
+                        started = true
+                        // m3u8 判定：URL 含 m3u8（含 m3u8.php 这类动态地址）或 Content-Type 为 mpegurl
+                        val isPlaylist = u.contains("m3u8", ignoreCase = true) ||
+                                resp.contentType()?.toString()?.contains("mpegurl") == true
+                        if (isPlaylist) {
+                            val text = withContext(Dispatchers.IO) { resp.bodyAsText() }
+                            call.respondText(rewritePlaylist(text, u, ref), ContentType.parse("application/vnd.apple.mpegurl"))
+                        } else {
+                            val channel = resp.bodyAsChannel()
+                            resp.headers[HttpHeaders.AcceptRanges]?.let { call.response.headers.append(HttpHeaders.AcceptRanges, it) }
+                            resp.headers[HttpHeaders.ContentRange]?.let { call.response.headers.append(HttpHeaders.ContentRange, it) }
+                            call.respondBytesWriter(
+                                contentType = resp.contentType(),
+                                status = resp.status,
+                                contentLength = resp.contentLength(),
+                            ) {
+                                channel.copyTo(this)
+                            }
+                        }
                     }
+                    return@get
+                } catch (e: Throwable) {
+                    lastErr = e
+                    if (started) throw e   // 响应已开始写入，无法换路重试
                 }
             }
+            call.respondText(
+                "拉流失败（两条路都不通）: ${lastErr?.message?.take(120)}",
+                ContentType.Text.Plain, HttpStatusCode.BadGateway,
+            )
         }
     }
 }
