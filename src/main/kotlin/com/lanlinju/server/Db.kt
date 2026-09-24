@@ -106,9 +106,14 @@ object Db {
         username: String, source: String, animeTitle: String, animeUrl: String,
         img: String, episodeName: String, episodeUrl: String, position: Double,
     ) = synchronized(conn) {
-        conn.prepareStatement("""INSERT OR REPLACE INTO history
+        conn.prepareStatement("""INSERT INTO history
             (username, source, anime_title, anime_url, img, episode_name, episode_url, position, updated)
-            VALUES(?,?,?,?,?,?,?,?,?)""").use { st ->
+            VALUES(?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(username, anime_url) DO UPDATE SET
+                source=excluded.source, anime_title=excluded.anime_title,
+                img=CASE WHEN excluded.img = '' THEN history.img ELSE excluded.img END,
+                episode_name=excluded.episode_name, episode_url=excluded.episode_url,
+                position=excluded.position, updated=excluded.updated""").use { st ->
             st.setString(1, username); st.setString(2, source); st.setString(3, animeTitle)
             st.setString(4, animeUrl); st.setString(5, img); st.setString(6, episodeName)
             st.setString(7, episodeUrl); st.setDouble(8, position)

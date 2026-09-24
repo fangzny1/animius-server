@@ -62,7 +62,7 @@ async function logout() { await api("/api/logout", { method: "POST" }); ME = nul
 /* ---------- 组件 ---------- */
 function card(a, opts = {}) {
   return `<div class="card" onclick="${opts.onclick || `openDetail('${a.source}','${esc(a.url)}')`}">
-    <div class="pic">
+    <div class="pic"${opts.picKey ? ` data-pic="${raw(opts.picKey).replace(/"/g, "&quot;")}"` : ""}>
       ${opts.deleteBtn ? `<button class="delete-x" onclick="event.stopPropagation();${opts.deleteBtn}">✕</button>` : ""}
       ${a.img ? `<img loading="lazy" src="${esc(a.img)}" onerror="this.style.visibility='hidden'">` : ""}
       ${a.episode ? `<span class="ep">${esc(a.episode)}</span>` : ""}
@@ -197,7 +197,7 @@ async function renderDetail(p) {
           ${chans.length > 1 ? `<div class="chan-tabs">${chans.map(c =>
             `<button class="${c === chan ? "active" : ""}" onclick="go('detail',{url:'${esc(p.url)}',source:'${d.source}',chan:'${c}'})">线路 ${+c + 1}</button>`).join("")}</div>` : ""}
           <div class="eplist">${d.channels[chan].map((ep, i) =>
-            `<button onclick="openWatch('${d.source}','${esc(d.title)}','${esc(ep.url)}','${esc(ep.name)}','${esc(p.url)}','${i}')">${esc(ep.name)}</button>`).join("")}</div>
+            `<button onclick="openWatch('${d.source}','${esc(d.title)}','${esc(ep.url)}','${esc(ep.name)}','${esc(p.url)}','${i}','${esc(d.img)}')">${esc(ep.name)}</button>`).join("")}</div>
         </div>
       </div>
     </div>
@@ -213,8 +213,8 @@ async function renderDetail(p) {
 }
 
 /* ---------- 播放 ---------- */
-function openWatch(source, title, epUrl, epName, animeUrl, epIndex) {
-  go("watch", { source, title, epUrl, epName, animeUrl, epIndex });
+function openWatch(source, title, epUrl, epName, animeUrl, epIndex, img) {
+  go("watch", { source, title, epUrl, epName, animeUrl, epIndex, img });
 }
 async function renderWatch(p) {
   view.innerHTML = `<div class="loading">解析视频地址…</div>`;
@@ -227,7 +227,7 @@ async function renderWatch(p) {
       <button class="btn" onclick="history.back()">← 返回详情，换一条线路试试</button></div>`;
     return;
   }
-  watchCtx = { source: p.source, title: p.title, img: "", animeUrl: p.animeUrl, episodeName: p.epName, episodeUrl: p.epUrl, upstream: v.upstream };
+  watchCtx = { source: p.source, title: p.title, img: p.img || "", animeUrl: p.animeUrl, episodeName: p.epName, episodeUrl: p.epUrl, upstream: v.upstream };
   const isHls = (v.upstream || "").split("?")[0].endsWith(".m3u8");
   const ST = await api("/api/settings");
   const subFontSize = (parseInt(ST.subFontSize) || 22);
@@ -264,13 +264,12 @@ async function renderWatch(p) {
     volume: 0.7, autoplay: true, setting: true, playbackRate: true, aspectRatio: true, flip: true,
     fullscreen: true, fullscreenWeb: true, miniProgressBar: true, airplay: true, pip: true,
     autoOrientation: true, autoSize: false,
-    // 注意：无字幕轨时不能传 subtitle: undefined —— Artplayer 5.4 类型校验会直接抛错（黑屏无控件）
-    ...(defaultTrack ? {
-      subtitle: {
-        url: defaultTrack.url, name: "animius", type: "vtt", escape: false, encoding: "utf-8",
-        style: subStyleBase, onVttLoad: (v) => v,
-      }
-    } : {}),
+    // 无内嵌字幕轨时用空 VTT 占位（Artplayer 5.4 不接受 subtitle: undefined），之后可 switch 外挂字幕
+    subtitle: {
+      url: defaultTrack ? defaultTrack.url : "/api/subtitle/empty",
+      name: "animius", type: "vtt", escape: false, encoding: "utf-8",
+      style: subStyleBase, onVttLoad: (v) => v,
+    },
     customType: {
       m3u8: function (video, url) {
         if (hls) { hls.destroy(); hls = null; }
@@ -316,18 +315,20 @@ async function renderWatch(p) {
   art.on("video:pause", save);
   art.on("destroy", save);
 
-  // 字幕区：开关 / 轨道选择 / AI 双语 / 进度（字幕轨由 HiAnime 源提供）
+  // 字幕区：内嵌轨道 / 外挂日文字幕（Kitsunekko）/ AI 双语
   const subarea = $("#subarea");
-  if (subTracks.length) {
-    const st = ST;
-    const tracks = subTracks;
-    let cur = defaultTrack;
-    const zhTrack = tracks.find(t => t.lang === "zh");
-    subarea.innerHTML = `
+  const st = ST;
+  const tracks = subTracks.slice();
+  let cur = defaultTrack;
+  const zhTrack = tracks.find(t => t.lang === "zh");
+  let aiOn = st.aiSubEnabled, aiGen = 0;
+  subarea.innerHTML = `
       <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subon" checked> 字幕</label>
       ${tracks.length > 1 ? `<select id="subtrack">${tracks.map(t => `<option value="${esc(t.label)}|${esc(t.lang)}" ${t === cur ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>` : ""}
-      <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>`;
-    let aiOn = $("#subai").checked, aiGen = 0;
+      <label style="color:var(--dim);font-size:14px"><input type="checkbox" id="subai" ${st.aiSubEnabled ? "checked" : ""}> ${zhTrack ? "自带中文" : "AI双语"}</label>
+      <button class="btn ghost" id="subext" style="padding:5px 10px;font-size:13px">🌐 日文字幕</button>
+      <select id="subextsel" class="hidden" style="max-width:190px;font-size:13px"></select>
+      <span id="subhint" style="color:var(--dim);font-size:13px"></span>`;
     const applySub = (url) => { try { art.subtitle.switch(url); } catch (e) {} };
     const showSub = (on) => {
       try { art.subtitle.show = on; } catch (e) {}
@@ -335,7 +336,7 @@ async function renderWatch(p) {
     };
     const setHint = (s) => { $("#subhint").textContent = s; };
     showSub(true);
-    subarea.insertAdjacentHTML("beforeend", `<span id="subhint" style="color:var(--dim);font-size:13px">字幕: ${esc(cur.label)}</span>`);
+    setHint(cur ? "字幕: " + cur.label : "该源无内嵌字幕，可点「日文字幕」外挂");
 
     // 一次性签名失效时自动重新解析拿新地址（k 参数保证翻译缓存不失效）
     const refreshTrackUrl = async (track) => {
@@ -353,6 +354,7 @@ async function renderWatch(p) {
       return false;
     };
     const loadTrack = async (track, bilingual) => {
+      if (!track) return false;
       const suffix = (bilingual && !zhTrack) ? "&translate=1" : "";
       let res = await fetch(track.url + suffix);
       if (!res.ok) {
@@ -390,9 +392,10 @@ async function renderWatch(p) {
         await loadTrack(zhTrack, false);
         setHint("自带中文字幕 ✓（无需 AI 翻译）");
       } else if (aiOn) await startAI();
-      else { aiGen++; await loadTrack(cur, false); setHint("字幕: " + cur.label); }
+      else { aiGen++; await loadTrack(cur, false); setHint(cur ? "字幕: " + cur.label : "已关闭翻译"); }
     };
     async function startAI() {
+      if (!cur) return;
       const gen = ++aiGen;   // 换轨/关闭时旧轮询自动作废
       if (!st.llmBaseUrl || !st.llmModel) {
         setHint("AI双语: 未配置 LLM（设置页填写）");
@@ -422,13 +425,37 @@ async function renderWatch(p) {
         }
       } catch (e) { setHint("AI双语失败: " + e.message); }
     }
-    if (aiOn) {
+    // 外挂日文字幕（Kitsunekko）：搜到就能挂上，配合 AI 双语 = 日语原文 + 中文翻译
+    const guessKw = () => (p.title || "")
+      .replace(/\|.*$/, "").replace(/第[0-9一二三四五六七八九十]+[集话季]/g, " ")
+      .replace(/Episode\s*\d+.*/i, " ").replace(/\s*[-–:：]\s*$/, "").trim();
+    $("#subext").onclick = async () => {
+      const kw = prompt("搜索日文字幕（用英文/罗马音片名效果最好）:", guessKw());
+      if (!kw) return;
+      setHint("正在搜索日文字幕…");
+      try {
+        const list = await api("/api/subtitle/remote?q=" + encodeURIComponent(kw));
+        const sel = $("#subextsel");
+        if (!list.length) { sel.classList.add("hidden"); setHint("没找到「" + kw + "」的日文字幕，换个关键词试试"); return; }
+        sel.classList.remove("hidden");
+        sel.innerHTML = `<option value="">找到 ${list.length} 个日文字幕…</option>` +
+          list.map((s, i) => `<option value="${i}">${esc(s.label)}</option>`).join("");
+        setHint("选一个字幕挂上（开 AI双语 = 日语原文+中文）");
+        sel.onchange = async () => {
+          const s = list[+sel.value];
+          if (!s) return;
+          const t = { label: "日文·" + s.name.replace(/\.(ass|srt|vtt)$/i, ""), lang: "ja", url: s.url };
+          tracks.push(t); cur = t;
+          if (aiOn && !zhTrack) await startAI();
+          else { await loadTrack(t, false); setHint("日文字幕 ✓ " + t.label); }
+        };
+      } catch (e) { setHint("搜索失败: " + e.message); }
+    };
+
+    if (aiOn && cur) {
       if (zhTrack) { cur = zhTrack; loadTrack(zhTrack, false).then(() => setHint("自带中文字幕 ✓（无需 AI 翻译）")); }
       else startAI();
     }
-  } else {
-    subarea.innerHTML = '<span id="subhint" style="color:var(--dim);font-size:13px">该源无字幕轨（字幕由 HiAnime 源提供）</span>';
-  }
 }
 
 function stopPlayer() {
@@ -446,9 +473,21 @@ async function renderHistory() {
     <div class="grid">${list.map(h => card(
       { source: h.source, url: h.animeUrl, img: h.img, title: h.title || h.animeTitle, episode: h.episodeName },
       { progress: h.position ? Math.round((h.position % 1e5) / 24) : 0,
-        onclick: `openWatch('${h.source}','${esc(h.animeTitle)}','${esc(h.episodeUrl)}','${esc(h.episodeName)}','${esc(h.animeUrl)}',0)`,
+        picKey: h.animeUrl,
+        onclick: `openWatch('${h.source}','${esc(h.animeTitle)}','${esc(h.episodeUrl)}','${esc(h.episodeName)}','${esc(h.animeUrl)}',0,'${esc(h.img || "")}')`,
         deleteBtn: `delHistory('${esc(h.animeUrl)}')` }
     )).join("")}</div>`;
+  // 旧记录 img 为空（早期版本播放页拿不到海报）：后台拉详情补图，更新卡片并持久化
+  list.filter(h => !h.img).forEach(h => {
+    api(`/api/detail?url=${encodeURIComponent(h.animeUrl)}&source=${h.source}`).then(async dd => {
+      if (!dd || !dd.img) return;
+      await api("/api/history", { method: "POST", body: JSON.stringify({
+        source: h.source, animeTitle: h.animeTitle, animeUrl: h.animeUrl, img: dd.img,
+        episodeName: h.episodeName, episodeUrl: h.episodeUrl, position: h.position }) }).catch(() => {});
+      const box = [...document.querySelectorAll("[data-pic]")].find(el => el.dataset.pic === h.animeUrl);
+      if (box && !box.querySelector("img")) box.insertAdjacentHTML("afterbegin", `<img loading="lazy" src="${esc(dd.img)}">`);
+    }).catch(() => {});
+  });
 }
 async function delHistory(url) { await api("/api/history/delete", { method: "POST", body: JSON.stringify({ animeUrl: url }) }); route(); }
 

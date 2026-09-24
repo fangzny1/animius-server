@@ -258,15 +258,15 @@ object Subtitles {
                         val bom = 0xFEFF.toChar()
                         if (raw.firstOrNull() == bom) raw.substring(1) else raw
                     }
-                    // CDN 限流/签名过期时可能返回 200 + HTML 错误页，绝不能缓存或端给播放器
-                    if (!body.startsWith("WEBVTT")) {
-                        throw IllegalStateException("字幕内容异常 head=「" + body.take(40) + "」")
-                    }
+                    // CDN 限流/签名过期时可能返回 200 + HTML 错误页，绝不能缓存或端给播放器；
+                    // 外挂字幕库给的是 .ass/.srt，顺手转成 VTT，后续翻译/缓存管线全复用
+                    val vtt = toVtt(body)
+                        ?: throw IllegalStateException("字幕内容异常 head=「" + body.take(40) + "」")
                     val host = runCatching { java.net.URI(url).host ?: "" }.getOrDefault("")
                     vttRouteMemo[host] = client === vttProxied   // 记住这个域名走哪条路
                     if (vttCache.size > 30) vttCache.clear()
-                    vttCache[url] = body
-                    return@withContext body
+                    vttCache[url] = vtt
+                    return@withContext vtt
                 } catch (e: Exception) {
                     lastError = e
                 }
@@ -394,6 +394,119 @@ object Subtitles {
                         ?: throw IllegalStateException("LLM 响应格式异常: ${resp.take(200)}")
                 }
         }
+
+    // ---------- 字幕格式转换（外挂字幕库多是 ASS/SRT） ----------
+
+    /** 已是 VTT 原样返回；ASS/SRT 转 VTT；都不是返回 null */
+    fun toVtt(raw: String): String? {
+        val body = raw.trim()
+        return when {
+            body.startsWith("WEBVTT") -> raw
+            "[Script Info]" in body || "Dialogue:" in body -> assToVtt(raw)
+            Regex("""\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->""").containsMatchIn(body) -> srtToVtt(raw)
+            else -> null
+        }
+    }
+
+    private fun assToVtt(ass: String): String {
+        val sb = StringBuilder("WEBVTT\r\n\r\n")
+        ass.lineSequence()
+            .filter { it.trimStart().startsWith("Dialogue:") }
+            .forEach { line ->
+                val parts = line.substringAfter("Dialogue:").split(",", limit = 10)
+                if (parts.size < 10) return@forEach
+                val text = parts[9]
+                    .replace(Regex("""\{[^}]*\}"""), "")          // {\an8} 等样式标签
+                    .replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ")
+                    .lines().joinToString("\n") { it.trim() }.trim()
+                if (text.isNotBlank()) {
+                    sb.append(assTime(parts[1].trim())).append(" --> ").append(assTime(parts[2].trim())).append("\r\n")
+                        .append(text).append("\r\n\r\n")
+                }
+            }
+        return sb.toString()
+    }
+
+    /** ASS 时间 H:MM:SS.cc -> VTT 的 0H:MM:SS.mmm */
+    private fun assTime(t: String): String {
+        val p = t.split(":", ".")
+        if (p.size < 3) return "00:00:00.000"
+        val h = p[0].toIntOrNull() ?: 0
+        val m = p[1].toIntOrNull() ?: 0
+        val sec = p[2].toIntOrNull() ?: 0
+        val cs = p.getOrNull(3)?.toIntOrNull() ?: 0
+        return "%02d:%02d:%02d.%03d".format(h, m, sec, cs * 10)
+    }
+
+    private fun srtToVtt(srt: String): String {
+        val sb = StringBuilder("WEBVTT\r\n\r\n")
+        srt.replace("\r\n", "\n").split(Regex("""\n\s*\n""")).forEach { block ->
+            val lines = block.lines().filter { it.isNotBlank() }
+            val ti = lines.indexOfFirst { "-->" in it }
+            if (ti < 0) return@forEach
+            val text = lines.drop(ti + 1).joinToString("\n").trim()
+            if (text.isNotBlank()) {
+                sb.append(lines[ti].replace(",", ".")).append("\r\n").append(text).append("\r\n\r\n")
+            }
+        }
+        return sb.toString()
+    }
+
+    // ---------- 外挂字幕库（Kitsunekko 日文字幕） ----------
+
+    data class RemoteSub(val folder: String, val name: String, val url: String)
+
+    private const val KIT_BASE = "https://kitsunekko.net"
+
+    @Volatile private var folderCache: Pair<Long, List<String>>? = null
+
+    private suspend fun kitGet(url: String): String {
+        var last: Exception? = null
+        for (client in vttClientOrder(url)) {
+            try {
+                return client.get(url) {
+                    headers { append(HttpHeaders.UserAgent, com.lanlinju.animius.util.DefaultUserAgent) }
+                }.bodyAsText()
+            } catch (e: Exception) { last = e }
+        }
+        throw IllegalStateException("字幕库访问失败: " + (last?.message?.take(80) ?: "unknown"))
+    }
+
+    private fun key(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
+
+    /** 按关键词搜日文字幕：先模糊匹配目录，再列文件（只看前三匹配，避免拉爆） */
+    suspend fun searchRemote(query: String): List<RemoteSub> = withContext(Dispatchers.IO) {
+        val folders = remoteFolders()
+        val q = key(query)
+        if (q.isBlank()) return@withContext emptyList()
+        val direct = folders.filter { key(it).contains(q) || q.contains(key(it)) }
+        val scored = if (direct.isNotEmpty()) direct else folders.map { f -> f to f.split(Regex("[^A-Za-z0-9]+"))
+            .count { w -> w.length > 2 && q.contains(w.lowercase()) } }
+            .filter { it.second > 0 }.sortedByDescending { it.second }.take(3).map { it.first }
+        scored.take(3).flatMap { folder -> remoteFiles(folder) }
+    }
+
+    private suspend fun remoteFolders(): List<String> {
+        folderCache?.let { (ts, list) -> if (System.currentTimeMillis() - ts < 24 * 3600_000) return list }
+        val html = kitGet("$KIT_BASE/dirlist.php?dir=subtitles/japanese/")
+        val list = Regex("""dirlist\.php\?dir=subtitles%2Fjapanese%2F([^"&/]+)%2F""")
+            .findAll(html).map { java.net.URLDecoder.decode(it.groupValues[1], "UTF-8") }
+            .distinct().filter { it.isNotBlank() }.toList()
+        if (list.isNotEmpty()) folderCache = System.currentTimeMillis() to list
+        return list
+    }
+
+    private suspend fun remoteFiles(folder: String): List<RemoteSub> {
+        val enc = java.net.URLEncoder.encode("subtitles/japanese/$folder/", "UTF-8")
+        val html = kitGet("$KIT_BASE/dirlist.php?dir=$enc")
+        return Regex("href=\"([^\"]+\\.(?:ass|srt|vtt))\"", RegexOption.IGNORE_CASE)
+            .findAll(html).map { it.groupValues[1] }
+            .distinct().map { href ->
+                val name = java.net.URLDecoder.decode(href.substringAfterLast('/'), "UTF-8")
+                val abs = if (href.startsWith("http")) href else KIT_BASE + (if (href.startsWith("/")) "" else "/") + href
+                RemoteSub(folder, name, abs)
+            }.toList()
+    }
 
     // ---------- VTT 解析 / 合成 ----------
 

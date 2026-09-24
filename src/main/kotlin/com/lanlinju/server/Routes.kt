@@ -150,6 +150,7 @@ private val b64dec = Base64.getUrlDecoder()
 
 private fun b64(s: String): String = b64enc.encodeToString(s.toByteArray(Charsets.UTF_8))
 private fun unb64(s: String): String = String(b64dec.decode(s), Charsets.UTF_8)
+private const val KIT_ORIGIN = "https://kitsunekko.net"
 
 private fun proxyPath(url: String, referer: String?): String {
     var p = "/api/proxy?u=${b64(url)}"
@@ -444,6 +445,28 @@ fun Application.module() {
                 ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
             val ck2 = call.request.queryParameters["k"]?.let { runCatching { unb64(it) }.getOrNull() }
             call.respondText(Subtitles.progressStatus(u, SettingsStore.file.parent, ck2).toString(), ContentType.Application.Json)
+        }
+        get("/api/subtitle/empty") {
+            call.authed() ?: return@get
+            call.respondText("WEBVTT\r\n\r\n", ContentType.parse("text/vtt; charset=utf-8"))
+        }
+        // 外挂字幕库搜索（Kitsunekko 日文字幕）：返回现成的字幕轨（含转换/翻译所需的 k/ref）
+        get("/api/subtitle/remote") {
+            call.authed() ?: return@get
+            val q = call.request.queryParameters["q"]?.trim().orEmpty()
+            if (q.isBlank()) return@get call.respondText("[]", ContentType.Application.Json)
+            val subs = runCatching { kotlinx.coroutines.runBlocking { Subtitles.searchRemote(q) } }
+                .getOrElse { emptyList() }
+            val arr = kotlinx.serialization.json.JsonArray(subs.take(40).map { s ->
+                buildJsonObject {
+                    put("folder", s.folder)
+                    put("name", s.name)
+                    put("label", "${s.folder} · ${s.name}")
+                    put("lang", "ja")
+                    put("url", "/api/subtitle?u=${b64(s.url)}&k=${b64("kit|${s.folder}|${s.name}")}&ref=${b64("$KIT_ORIGIN/")}")
+                }
+            })
+            call.respondText(arr.toString(), ContentType.Application.Json)
         }
         get("/api/subtitle/test") {
             call.authed() ?: return@get
