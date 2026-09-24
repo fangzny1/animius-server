@@ -226,29 +226,40 @@ object Subtitles {
     suspend fun fetchVtt(url: String, referer: String?): String = withContext(Dispatchers.IO) {
         vttCache[url]?.let { return@withContext it }
         var lastError: Exception? = null
-        // 新签名 URL 偶发先回 403/限流页，稍候重试即可
-        repeat(3) { attempt ->
-            try {
-                val body = vttClient.get(url) {
-                    headers {
-                        append(HttpHeaders.UserAgent, com.lanlinju.animius.util.DefaultUserAgent)
-                        if (!referer.isNullOrBlank()) append("Referer", referer)
+        // CDN 反盗链只认播放页/embed 站来源，自来源或无来源会 403 —— 依次试候选 Referer
+        val self = runCatching {
+            val u = java.net.URI(url)
+            "${u.scheme}://${u.host}/"
+        }.getOrDefault("")
+        val candidates = listOfNotNull(
+            referer?.takeIf { it.isNotBlank() },
+            self.takeIf { it.isNotBlank() && it != referer },
+            "",
+        ).distinct()
+        for (ref in candidates) {
+            repeat(2) { attempt ->
+                try {
+                    val body = vttClient.get(url) {
+                        headers {
+                            append(HttpHeaders.UserAgent, com.lanlinju.animius.util.DefaultUserAgent)
+                            if (ref.isNotBlank()) append("Referer", ref)
+                        }
+                    }.bodyAsText().let { raw ->
+                        // 剥 UTF-8 BOM（Kotlin 的 trimStart 不认 BOM，需显式指定）
+                        val bom = 0xFEFF.toChar()
+                        if (raw.firstOrNull() == bom) raw.substring(1) else raw
                     }
-                }.bodyAsText().let { raw ->
-                    // 剥 UTF-8 BOM（Kotlin 的 trimStart 不认 BOM，需显式指定）
-                    val bom = 0xFEFF.toChar()
-                    if (raw.firstOrNull() == bom) raw.substring(1) else raw
+                    // CDN 限流/签名过期时可能返回 200 + HTML 错误页，绝不能缓存或端给播放器
+                    if (!body.startsWith("WEBVTT")) {
+                        throw IllegalStateException("字幕内容异常 head=「" + body.take(40) + "」")
+                    }
+                    if (vttCache.size > 30) vttCache.clear()
+                    vttCache[url] = body
+                    return@withContext body
+                } catch (e: Exception) {
+                    lastError = e
+                    kotlinx.coroutines.delay(800L * (attempt + 1))
                 }
-                // CDN 限流/签名过期时可能返回 200 + HTML 错误页，绝不能缓存或端给播放器
-                if (!body.startsWith("WEBVTT")) {
-                    throw IllegalStateException("字幕内容异常 head=「" + body.take(40) + "」")
-                }
-                if (vttCache.size > 30) vttCache.clear()
-                vttCache[url] = body
-                return@withContext body
-            } catch (e: Exception) {
-                lastError = e
-                kotlinx.coroutines.delay(1200L * (attempt + 1))
             }
         }
         throw IllegalStateException(

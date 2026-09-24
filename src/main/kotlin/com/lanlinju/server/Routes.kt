@@ -359,7 +359,8 @@ fun Application.module() {
                 episode = call.request.queryParameters["ep"] ?: "",
                 subtitles = bean.subtitles.map {
                     // k = label|lang|集URL：跨重新解析稳定，且按集区分（否则第二集会命中第一集的翻译缓存）
-                    SubtitleDto(it.label, it.lang, "/api/subtitle?u=${b64(it.url)}&k=${b64(it.label + "|" + it.lang + "|" + url)}")
+                    // ref = embed 站来源：字幕 CDN 反盗链只认播放页来源，带错 Referer 必 403
+                    SubtitleDto(it.label, it.lang, "/api/subtitle?u=${b64(it.url)}&k=${b64(it.label + "|" + it.lang + "|" + url)}&ref=${b64(ref)}")
                 },
             )
             call.respondText(Json.encodeToString(VideoDto.serializer(), dto), ContentType.Application.Json)
@@ -370,7 +371,8 @@ fun Application.module() {
             call.authed() ?: return@get
             val u = call.request.queryParameters["u"]?.let { runCatching { unb64(it) }.getOrNull() }
                 ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
-            val referer = originOf(u)
+            val referer = call.request.queryParameters["ref"]?.let { runCatching { unb64(it) }.getOrNull() }
+                ?.takeIf { it.isNotBlank() } ?: originOf(u)
             val translate = call.request.queryParameters["translate"] == "1"
             val cacheKey = call.request.queryParameters["k"]?.let { runCatching { unb64(it) }.getOrNull() }
             val dataDir = SettingsStore.file.parent
@@ -420,7 +422,9 @@ fun Application.module() {
             val u = call.request.queryParameters["u"]?.let { runCatching { unb64(it) }.getOrNull() }
                 ?: return@get call.respondText("missing u", ContentType.Text.Plain, HttpStatusCode.BadRequest)
             val ck = call.request.queryParameters["k"]?.let { runCatching { unb64(it) }.getOrNull() }
-            call.respondText(Subtitles.prepareAsync(u, originOf(u), SettingsStore.file.parent, ck).toString(), ContentType.Application.Json)
+            val ref = call.request.queryParameters["ref"]?.let { runCatching { unb64(it) }.getOrNull() }
+                ?.takeIf { it.isNotBlank() } ?: originOf(u)
+            call.respondText(Subtitles.prepareAsync(u, ref, SettingsStore.file.parent, ck).toString(), ContentType.Application.Json)
         }
         get("/api/subtitle/progress") {
             call.authed() ?: return@get

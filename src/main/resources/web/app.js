@@ -368,7 +368,8 @@ async function renderWatch(p) {
     };
     const subKey = (track) => {
       const q = new URLSearchParams(track.url.split("?")[1]);
-      return "u=" + encodeURIComponent(q.get("u") || "") + (q.get("k") ? "&k=" + encodeURIComponent(q.get("k")) : "");
+      const enc = encodeURIComponent;
+      return "u=" + enc(q.get("u") || "") + (q.get("k") ? "&k=" + enc(q.get("k")) : "") + (q.get("ref") ? "&ref=" + enc(q.get("ref")) : "");
     };
     $("#subon").onchange = (e) => showSub(e.target.checked);
     const trSel = $("#subtrack");

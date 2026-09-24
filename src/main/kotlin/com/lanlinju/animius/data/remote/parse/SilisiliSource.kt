@@ -249,15 +249,29 @@ object SilisiliSource : AnimeSource {
     }
 
     private fun postRequest(url: String): String {
-        val client = OkHttpClient.Builder().build()
+        // 站点这个接口偶发 >10s 才响应（默认 read timeout 10s 会断），加长超时 + 重试
+        val client = OkHttpClient.Builder()
+            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
         val body = FormBody.Builder().add("player", "sili").build()
         val request = Request.Builder()
             .url(url)
             .addHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
             .post(body)
             .build()
-        val response = client.newCall(request).execute()
-        return response.body!!.charStream().readText()
+        var lastErr: Exception? = null
+        repeat(3) {
+            try {
+                client.newCall(request).execute().use { resp ->
+                    return resp.body!!.charStream().readText()
+                }
+            } catch (e: Exception) {
+                lastErr = e
+            }
+        }
+        throw IllegalStateException("Silisili 取播放地址失败（站点响应慢，稍后重试）: ${lastErr?.message ?: "unknown"}")
     }
 
     /**
