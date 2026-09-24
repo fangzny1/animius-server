@@ -264,10 +264,13 @@ async function renderWatch(p) {
     volume: 0.7, autoplay: true, setting: true, playbackRate: true, aspectRatio: true, flip: true,
     fullscreen: true, fullscreenWeb: true, miniProgressBar: true, airplay: true, pip: true,
     autoOrientation: true, autoSize: false,
-    subtitle: defaultTrack ? {
-      url: defaultTrack.url, name: "animius", type: "vtt", escape: false, encoding: "utf-8",
-      style: subStyleBase, onVttLoad: (v) => v,
-    } : undefined,
+    // 注意：无字幕轨时不能传 subtitle: undefined —— Artplayer 5.4 类型校验会直接抛错（黑屏无控件）
+    ...(defaultTrack ? {
+      subtitle: {
+        url: defaultTrack.url, name: "animius", type: "vtt", escape: false, encoding: "utf-8",
+        style: subStyleBase, onVttLoad: (v) => v,
+      }
+    } : {}),
     customType: {
       m3u8: function (video, url) {
         if (hls) { hls.destroy(); hls = null; }

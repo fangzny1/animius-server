@@ -321,28 +321,37 @@ object Subtitles {
         }
 
         val result = buildVtt(cues) { i -> translated.getOrNull(i)?.takeIf { it.isNotBlank() } }
-        cache.toFile().writeText(result)   // 全部完成才落地成品
+        if (translated.none { !it.isNullOrBlank() }) {
+            // 一条都没翻出来（模型/配置问题）：保留进度快照供重试，绝不落地假“成品”
+            throw IllegalStateException("LLM 未返回任何译文（检查设置页模型配置）")
+        }
+        cache.toFile().writeText(result)
         part.delete()
         progressMap.remove(pk)
         return result
     }
 
     private suspend fun chatWithRetry(base: String, key: String, model: String, userMsg: String): List<String> {
+        var lastError: String? = null
         repeat(2) { attempt ->
-            runCatching {
+            try {
                 val reply = chat(base, key, model, userMsg)
                     .replace(Regex("(?s)<think>.*?</think>"), "") // 去掉思考模型的思维链
-                val objStr = Regex("\\{[\\s\\S]*\\}").find(reply)?.value ?: return@runCatching
+                val objStr = Regex("\\{[\\s\\S]*\\}").find(reply)?.value
+                    ?: throw IllegalStateException("模型未返回 JSON: ${reply.take(80)}")
                 val t = runCatching { json.parseToJsonElement(objStr).jsonObject["t"]?.jsonArray }
                     .getOrElse {
                         // 兼容单引号 JSON（部分模型输出 Python 风格）
                         json.parseToJsonElement(objStr.replace('\'', '"')).jsonObject["t"]?.jsonArray
-                    } ?: return@runCatching
+                    } ?: throw IllegalStateException("JSON 里没有 t 数组: ${objStr.take(80)}")
                 return t.map { it.jsonPrimitive.content }
+            } catch (e: Exception) {
+                lastError = e.message?.take(150) ?: e.javaClass.simpleName
+                kotlinx.coroutines.delay(500L * (attempt + 1))
             }
-            kotlinx.coroutines.delay(500L * (attempt + 1))
         }
-        return emptyList()
+        // 翻译失败必须抛出来让上层报错，绝不能悄悄返回空列表装成功
+        throw IllegalStateException("LLM 翻译失败: ${lastError ?: "unknown"}")
     }
 
     private suspend fun chat(base: String, apiKey: String, model: String, userMsg: String): String =
